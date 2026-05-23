@@ -36,12 +36,16 @@ def write_static_catalog(
     name_mapping: list[dict],
     data_files: list[dict],
     format_version_in_metadata: int = 2,
+    location_uri: str | None = None,
+    meta_dir_name: str = "metadata",
 ) -> Path:
     """Write metadata.json + manifest + manifest-list for a table.
 
     Args:
       table_root: filesystem directory containing `data/` (parquets) and where
-        `metadata/` will be created.
+        `metadata/` will be created. Files are always written to this local
+        path; `location_uri` only controls the URIs recorded inside the
+        metadata for engines that read it from a different location later.
       iceberg_schema: pyiceberg Schema used by the manifest writer. Field IDs
         must match the schema JSON.
       schema_json_fields: the `fields` array as it should appear in metadata.json.
@@ -58,11 +62,26 @@ def write_static_catalog(
       format_version_in_metadata: write `format-version: N` to metadata.json.
         Set to 3 to claim a V3 table even though the manifest avro is V2 (until
         pyiceberg supports V3 writes natively).
+      location_uri: URI prefix to record in metadata.json's `location` and in
+        each data file's `file_path` (e.g. `gs://bucket/v3_geometry`). Pass
+        without a trailing slash. If None (default), uses
+        `file://{table_root.resolve()}` so the catalog is self-contained on
+        the local disk.
+      meta_dir_name: subdirectory of `table_root` to write the metadata files
+        into (default `"metadata"`). When building a cloud-bound catalog
+        alongside the local one, pass e.g. `"metadata-gcs"` so the file://
+        catalog at `metadata/` isn't overwritten. The URI structure inside
+        metadata.json always uses `<location_uri>/metadata/<file>` regardless
+        — the caller's upload step is what maps the local sibling dir to
+        `metadata/` on the remote.
 
     Returns:
       Path to the metadata.json file.
     """
-    meta_dir = table_root / "metadata"
+    if location_uri is None:
+        location_uri = f"file://{table_root.resolve()}"
+    location_uri = location_uri.rstrip("/")
+    meta_dir = table_root / meta_dir_name
     meta_dir.mkdir(parents=True, exist_ok=True)
 
     snapshot_id = int(time.time() * 1000)
@@ -87,7 +106,7 @@ def write_static_catalog(
                     file_sequence_number=sequence_number,
                     data_file=DataFile.from_args(
                         content=DataFileContent.DATA,
-                        file_path=f"file://{(table_root / df['path']).resolve()}",
+                        file_path=f"{location_uri}/{df['path']}",
                         file_format=FileFormat.PARQUET,
                         partition=Record(),
                         record_count=df["rows"],
@@ -98,6 +117,12 @@ def write_static_catalog(
                 )
             )
     manifest = mw.to_manifest_file()
+    # The manifest avro is written to the local meta_dir; in the manifest-list
+    # we record it under `location_uri/metadata/...` so an engine pointing at
+    # the remote copy of the catalog can resolve it. ManifestFile.manifest_path
+    # has no setter, but ManifestFile is a Record backed by a mutable list at
+    # _data — index 0 is manifest_path.
+    manifest._data[0] = f"{location_uri}/metadata/{manifest_path.name}"
 
     manifest_list_path = meta_dir / f"snap-{snapshot_id}-manifest-list.avro"
     with write_manifest_list(
@@ -113,7 +138,7 @@ def write_static_catalog(
     metadata = {
         "format-version": format_version_in_metadata,
         "table-uuid": str(uuid.uuid4()),
-        "location": f"file://{table_root.resolve()}",
+        "location": location_uri,
         "last-sequence-number": sequence_number,
         "last-updated-ms": snapshot_id,
         "last-column-id": max(f["id"] for f in schema_json_fields if "id" in f),
@@ -134,7 +159,7 @@ def write_static_catalog(
                 "snapshot-id": snapshot_id,
                 "sequence-number": sequence_number,
                 "timestamp-ms": snapshot_id,
-                "manifest-list": f"file://{manifest_list_path.resolve()}",
+                "manifest-list": f"{location_uri}/metadata/{manifest_list_path.name}",
                 "summary": {"operation": "append"},
                 "schema-id": 0,
             }

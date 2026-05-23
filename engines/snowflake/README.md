@@ -1,23 +1,84 @@
-# Snowflake engine runner — TODO
+# Snowflake engine runner — blocked
 
-Snowflake announced V3 support with native `GEOMETRY` / `GEOGRAPHY` types and
-per-file manifest bbox pruning. This runner is a placeholder for verifying
-that end-to-end.
+Status as of **2026-05-23.** Two account states tried; both blocked.
 
-Plan:
+## Account A — `SXA81489` (CARTO dev, shared)
 
-1. Stage the same 10 regional parquet files into a Snowflake external stage
-   (`@my_stage/v3_geometry/data/`).
-2. Create an Iceberg table from the existing static metadata via
-   `CREATE ICEBERG TABLE ... CATALOG = 'OBJECT_STORE_CATALOG' METADATA_FILE_PATH = '...'`.
-3. Run the same `ST_Intersects` probe query.
-4. Inspect the query profile (`SYSTEM$EXPLAIN_PLAN_JSON(...)`) for the
-   `partitionsScanned` / `bytesScanned` numbers; assert that only one file's
-   worth of data was touched.
+Discovery only. The available role (`TEST_ROLE`) cannot
+`CREATE EXTERNAL VOLUME` — the privilege is account-scoped and requires
+`ACCOUNTADMIN`. No external volumes exist for us to reuse. The one
+existing storage integration is wired for EXTERNAL_STAGE (file loading),
+not Iceberg external volumes.
 
-Open questions:
-- Does Snowflake's "OBJECT_STORE_CATALOG" mode read our hand-written
-  static metadata.json, or does it require an Iceberg REST catalog?
-- Which Snowflake account types/regions have V3 GA today vs preview?
+To unblock this account, ACCOUNTADMIN would need to:
+- Create an external volume backed by S3 (the account is on AWS_US_EAST_1)
+- Grant USAGE on it to `TEST_ROLE`
 
-Contributions welcome.
+## Account B — `KJEIDXA-IK05112` (personal trial, GCP_EUROPE_WEST2)
+
+We have `ACCOUNTADMIN` here. Got further but hit a different wall.
+
+What works:
+- `CREATE EXTERNAL VOLUME` against either the US public bucket or a
+  same-region (EU) public bucket.
+- `SYSTEM$VERIFY_EXTERNAL_VOLUME(...)` returns
+  `success: true` with `writeResult/readResult/listResult/deleteResult = PASSED`
+  once Snowflake's GCP service account
+  (`nkxeengujz@gcpeuropewest2-1-4e2d.iam.gserviceaccount.com`) is granted
+  `objectAdmin` on the bucket. (Public-read alone isn't sufficient for verify
+  — Snowflake's check requires write/list/delete to all pass.)
+- `CREATE CATALOG INTEGRATION ICEBERG_FILES CATALOG_SOURCE = OBJECT_STORE
+  TABLE_FORMAT = ICEBERG ENABLED = TRUE` succeeds.
+
+What does **not** work:
+- **Any** `CREATE ICEBERG TABLE` (managed *or* unmanaged) against the
+  verified external volume fails with:
+
+      091369 (55000): Query needs to be retried to setup external volume
+      for Iceberg table <NAME>. Please retry the query.
+
+  The error is misleading — retries don't help. We exhaustively tested:
+  retry-after-delay (0s, 5s, 15s, 30s), `AUTO_REFRESH=FALSE`, full nuke +
+  rebuild of the volume + catalog + database with fresh names,
+  `CATALOG='SNOWFLAKE'` (managed) vs `CATALOG='ICEBERG_FILES'` (unmanaged),
+  cross-region US bucket vs same-region EU bucket. The error is identical
+  in every case. Snowflake's `INFORMATION_SCHEMA.QUERY_HISTORY` returns the
+  same unhelpful message — there's no deeper error to surface.
+
+  Since the error reproduces for **Snowflake-managed Iceberg too**, the
+  blocker is not in our hand-written metadata. It's something in Snowflake's
+  fresh-account Iceberg setup pipeline.
+
+## What works for someone with a non-blocked account
+
+If you have a Snowflake account where `CREATE ICEBERG TABLE` succeeds,
+everything is in place to register and probe our fixtures. Run
+`engines/snowflake/_provision.py` first to set up the catalog integration
++ external volume against the public bucket, then:
+
+```sql
+CREATE OR REPLACE ICEBERG TABLE v2_flat_columns
+  EXTERNAL_VOLUME = 'ICEBERG_TESTBED_VOLUME'
+  CATALOG = 'ICEBERG_FILES'
+  METADATA_FILE_PATH = 'v2_flat_columns/metadata/v1.metadata.json';
+
+SELECT COUNT(*) FROM v2_flat_columns
+  WHERE xmin <= -118 AND xmax >= -125 AND ymin <= 40 AND ymax >= 37;
+-- expect 196 rows. Compare query profile's partitions_scanned to confirm
+-- file-level pruning to 1/10 files.
+```
+
+## Files in this directory
+
+- `_creds.py` — credentials loader with two backends: a 3-line text file at
+  `~/.config/iceberg-geo-testbed/snowflake.txt` (URL / user / password)
+  for personal accounts, or the CARTO `carto-dev-database-credentials`
+  gcloud secret. Picks file backend first if the file exists.
+- `_discover.py` — read-only one-shot discovery probe: account info,
+  available roles, existing iceberg infra, privilege probe.
+- `_provision.py` — idempotent setup: catalog integration + external volume
+  pointing at the public testbed bucket + `ICEBERG_TESTBED` database.
+
+`run.py` (TODO) — once the 091369 blocker is resolved on a working account,
+pattern after `engines/bigquery/run.py`: register all three fixtures, run
+probes, report the L0–L4 ladder per fixture.

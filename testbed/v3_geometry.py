@@ -26,7 +26,7 @@ import pyarrow.parquet as pq
 from pyiceberg.schema import Schema
 from pyiceberg.types import BinaryType, NestedField, StringType
 
-from .common import REGIONS, packed_xy_le, wkb_point_le
+from .common import REGIONS, packed_xy_le, stable_seed, wkb_point_le
 from ._static_catalog import write_static_catalog
 
 ROOT = Path(__file__).parent.parent / "data" / "v3_geometry"
@@ -53,7 +53,7 @@ ARROW_SCHEMA = pa.schema(
 
 
 def _write_parquet(region) -> Path:
-    rng = random.Random(hash(region.name) & 0xFFFFFFFF)
+    rng = random.Random(stable_seed(region.name))
     rows = 1000
     ids, geoms = [], []
     for i in range(rows):
@@ -75,7 +75,12 @@ def _write_parquet(region) -> Path:
     return out
 
 
-def build(encoding: str = "packed_xy") -> Path:
+def build(
+    encoding: str = "packed_xy",
+    *,
+    location_uri: str | None = None,
+    meta_dir_name: str = "metadata",
+) -> Path:
     """encoding ∈ {"packed_xy", "wkb_point"} — the encoding used for the geometry
     column's lower/upper bound bytes."""
     if encoding == "packed_xy":
@@ -113,6 +118,8 @@ def build(encoding: str = "packed_xy") -> Path:
         ],
         data_files=data_files,
         format_version_in_metadata=3,
+        location_uri=location_uri,
+        meta_dir_name=meta_dir_name,
     )
 
 

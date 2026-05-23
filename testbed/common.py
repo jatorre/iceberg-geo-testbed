@@ -1,5 +1,10 @@
 """Shared fixtures and helpers for the engine-agnostic Iceberg test runners.
 
+Determinism note: rebuilds of the same fixture in different Python processes
+must produce byte-identical parquet files. Python's built-in `hash()` is
+seeded per-process, so we use `stable_seed(name)` (hashlib-based) to derive
+the per-region RNG seed instead.
+
 Each runner builds a tiny "static catalog" — `metadata.json` + manifest avro
 files on disk — over 10 disjoint world regions × 1000 synthetic rows each.
 A correct file-level pruner should narrow any single-region bbox query to one
@@ -8,6 +13,7 @@ file. We grep `EXPLAIN ANALYZE` output for "Total Files Read: N" to assert.
 
 from __future__ import annotations
 
+import hashlib
 import struct
 from dataclasses import dataclass
 
@@ -56,3 +62,11 @@ def packed_xy_le(x: float, y: float) -> bytes:
     """16 bytes: x then y as little-endian doubles. The Iceberg V3 spec format
     for 2D geometry bounds per the manifest encoding."""
     return struct.pack("<dd", x, y)
+
+
+def stable_seed(name: str) -> int:
+    """32-bit deterministic seed for `random.Random()`, derived from a stable
+    hash of `name`. Python's builtin `hash()` is per-process-seeded, so using
+    it would make fixture builds non-reproducible across processes."""
+    h = hashlib.sha256(name.encode("utf-8")).digest()
+    return int.from_bytes(h[:4], "little")

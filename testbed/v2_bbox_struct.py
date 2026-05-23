@@ -16,7 +16,7 @@ import pyarrow.parquet as pq
 from pyiceberg.schema import Schema
 from pyiceberg.types import DoubleType, NestedField, StringType, StructType
 
-from .common import REGIONS, double_le
+from .common import REGIONS, double_le, stable_seed
 from ._static_catalog import write_static_catalog
 
 ROOT = Path(__file__).parent.parent / "data" / "v2_bbox_struct"
@@ -62,7 +62,7 @@ ICEBERG_SCHEMA = Schema(
 
 
 def _write_parquet(region) -> Path:
-    rng = random.Random(hash(region.name) & 0xFFFFFFFF)
+    rng = random.Random(stable_seed(region.name))
     rows = 1000
     xmins, ymins, xmaxs, ymaxs, ids = [], [], [], [], []
     for i in range(rows):
@@ -96,7 +96,7 @@ def _write_parquet(region) -> Path:
     return out
 
 
-def build() -> Path:
+def build(*, location_uri: str | None = None, meta_dir_name: str = "metadata") -> Path:
     data_files = []
     for region in REGIONS:
         p = _write_parquet(region)
@@ -154,6 +154,8 @@ def build() -> Path:
             },
         ],
         data_files=data_files,
+        location_uri=location_uri,
+        meta_dir_name=meta_dir_name,
     )
 
 
