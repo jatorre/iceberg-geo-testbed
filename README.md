@@ -1,63 +1,79 @@
 # iceberg-geo-testbed
 
-A small testbed for **Apache Iceberg V3 geospatial support across query engines**. The goal is to characterize, end-to-end, where each engine actually delivers on the V3 spec promise of *per-file spatial pruning via geometry bounds in the manifest* — and to feed back any gaps as upstream PRs (DuckDB, PyIceberg, etc.).
+A cross-engine testbed for **Apache Iceberg geospatial support** — V2 and V3 — plus the adjacent GeoParquet path. The goal is one reproducible place to ask, per engine: *can it query geo data through Iceberg today, and does it prune files for spatial predicates?*
 
-> Iceberg V3 (mid-2025) added native `geometry` and `geography` types with per-file `lower_bounds` / `upper_bounds` in the manifest. In principle, a query like `WHERE ST_Intersects(geom, bbox_literal)` should skip non-overlapping files before opening any footer. That's the test we're running here, engine by engine.
+> Iceberg V3 (mid-2025) introduced native `geometry`/`geography` types with per-file `lower_bounds`/`upper_bounds` in the manifest. The spec promises that a query like `WHERE ST_Intersects(geom, bbox)` can prune non-overlapping files before touching their data. This repo verifies who actually delivers.
 
-## Status (2026-05-23)
+## Conclusions matrix
 
-| Engine | V3 geo schema | Data scan | **Manifest-level geometry pruning** | Notes |
-|---|---|---|---|---|
-| **DuckDB 1.5.3** | ✅ reads `geometry(OGC:CRS84)` from `metadata.json` | ✅ | ❌ **`DeserializeValue` lacks a GEOMETRY branch** → `Failed to deserialize blob … attempting to produce value of type 'GEOMETRY(...)'`. Pruning bails. | First-shipped (May 20 2026). Half-wired. PR opportunity: add the geometry branch to [`IcebergValue::DeserializeValue`](https://github.com/duckdb/duckdb-iceberg/blob/main/src/core/expression/iceberg_value.cpp). |
-| **DuckDB 1.5.3 (V2 fallback, flat bbox cols)** | n/a — `xmin/ymin/xmax/ymax` doubles | ✅ | ✅ Prunes 9 of 10 files in our synthetic test | The working answer today if you control the schema. |
-| **DuckDB 1.5.3 (V2, `bbox` struct cols)** | n/a — `bbox.{xmin,…}` doubles | ✅ | ❌ Doesn't push struct-field predicates to manifest | GeoParquet 1.1 covering convention loses to this. |
-| **Snowflake** | _untested here_ | — | Per Snowflake docs, manifest bbox stats are used for pruning. Need to verify with a hosted table. | |
-| **Wherobots / Sedona** | _untested here_ | — | Production user of V3 geo manifest pruning (their Havasu predecessor → upstream V3). | |
-| **PyIceberg** | ❌ no `GeometryType` writer (0.11.1) | n/a | n/a | Tracking issue: [iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818). |
-| **DuckLake** | "forthcoming" geometry stats per 0.3 notes | — | — | Re-test on every release. |
+Last refreshed: **TBD** (run `engines/<engine>/run.py` to update).
+
+| Engine / version | Geo via V2 (flat bbox cols) | Geo via V2 (`bbox` struct) | Geo via V3 (native `geometry`) | Spatial pruning at file level | SRID / CRS handling | Geometry vs Geography | Notes |
+|---|---|---|---|---|---|---|---|
+| **DuckDB 1.5.3** | ✅ reads, ✅ prunes (1/10 files in probe) | ✅ reads, ❌ doesn't prune (struct-field gap) | ✅ schema parsed, ✅ data scan, ❌ bound deserializer not implemented | Works for top-level numeric columns; broken for geometry column bounds | Reads `geometry(<CRS>)` from metadata.json; CRS visible in column type | Geometry only — geography deserializer also missing | See [docs/duckdb-gap.md](docs/duckdb-gap.md) for the exact source-level gap and PR plan |
+| **Snowflake** | ❓ untested | ❓ | ❓ | ❓ | ❓ | ❓ | Runner in `engines/snowflake/` |
+| **BigQuery / BigLake** | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | Runner in `engines/bigquery/` |
+| **Apache Sedona** | ❓ | ❓ | ❓ (ground-truth implementation) | Expected ✅ — V3 lineage came from their Havasu | ❓ | ❓ | Runner in `engines/sedona/` |
+| **PyIceberg 0.11.1** | ✅ read | ✅ read | ⚠️ partial — V3 read landed; no `GeometryType` writer | n/a (catalog only) | n/a | n/a | Tracking [iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818) |
+| **DuckLake 1.0** | — | — | "forthcoming" | — | — | — | Re-test each release |
+
+### Adjacent: GeoParquet (no Iceberg)
+
+Same engines, just `read_parquet(...)` directly. Documented here because it's the alternative path our consumers actually use today.
+
+| Engine | GeoParquet 1.1 covering bbox (per-row-group) | File-level pruning (across many files) | Notes |
+|---|---|---|---|
+| **DuckDB 1.5.3** | ✅ — prunes row groups within each file | ❌ — opens every file's footer; no manifest equivalent | The motivating problem. ~90s cold for SF-bbox query over the 512-file Overture buildings dataset. |
+| **Snowflake** | ❓ | ❓ | |
+| **BigQuery** | ❓ | ❓ | |
 
 ## What's in here
 
 ```
-testbed/                   # Self-contained test runners
+testbed/                   # Engine-agnostic test fixtures
   v2_flat_columns.py       # V2 Iceberg with flat xmin/ymin/xmax/ymax columns + per-file bounds
-  v2_bbox_struct.py        # V2 with bbox struct; shows struct-pushdown gap
-  v3_geometry.py           # V3 with native geometry column; expected DuckDB failure
-  common.py                # Shared region fixtures + bound encoding helpers
+  v2_bbox_struct.py        # V2 with GeoParquet-1.1-style bbox struct column
+  v3_geometry.py           # V3 with native geometry(OGC:CRS84) column
+  common.py                # 10-region fixture data + bound-encoding helpers
+  _static_catalog.py       # Hand-writes metadata.json + manifest avro + manifest-list
 
 engines/
-  duckdb/                  # Runner + EXPLAIN ANALYZE comparison scripts
-  snowflake/               # (TODO) Stage tables into Snowflake, run same queries via /sql, log pruning telemetry
-  bigquery/                # (TODO) BigLake-hosted V3 tables, same comparison
-  sedona/                  # (TODO) Docker-based runner, ground-truth implementation of V3 geo
+  duckdb/                  # Working today
+  snowflake/               # Planned
+  bigquery/                # Planned
+  sedona/                  # Planned — reference implementation
 
 docs/
-  encoding.md              # Iceberg V3 geometry bound byte format (per spec)
-  duckdb-gap.md            # Exact source-level gap, repro, proposed PR
-  engine-matrix.md         # Live matrix of who supports what
+  duckdb-gap.md            # Source-level analysis of the DuckDB 1.5.3 geometry-bound gap
+  encoding.md              # V3 geometry bound byte layout per spec
+  engine-matrix.md         # Detailed per-engine notes
 ```
 
-## Run the DuckDB baseline tests
+## How the tests work
+
+Each fixture builds a tiny **static Iceberg catalog** — `metadata.json` + manifest avro on disk, no live catalog server — over 10 disjoint world regions × 1000 synthetic rows each. A correct file-level pruner narrows the California-window probe query to **one** file. We grep `Total Files Read:` from `EXPLAIN ANALYZE` (or the engine's equivalent telemetry).
 
 ```bash
-brew install duckdb              # ≥1.5.3
+brew install duckdb              # ≥ 1.5.3
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python testbed/v2_flat_columns.py    # → builds table, prints query + EXPLAIN
-python testbed/v2_bbox_struct.py
-python testbed/v3_geometry.py        # → expected: DuckDB deserialize error today
-```
+# Build the three fixture tables
+python -m testbed.v2_flat_columns
+python -m testbed.v2_bbox_struct
+python -m testbed.v3_geometry
 
-Each runner builds a **static Iceberg catalog** by hand (no live REST catalog — just `metadata.json` + manifest avro files on disk), then queries via DuckDB's `iceberg_scan(...)`. The schema is 10 disjoint world regions × 1000 fake points each, so file-level pruning should narrow to one file for any tight bbox query. We grep `Total Files Read:` from `EXPLAIN ANALYZE` to assert the pruning behavior.
+# Run the DuckDB engine matrix
+python engines/duckdb/run.py
+```
 
 ## Why this exists
 
-In the [`tilerPrototype`](https://github.com/jatorre/tilerPrototype) work I ran into the practical limits of GeoParquet for "many files, fast bbox query" workloads — DuckDB has to walk every file footer to evaluate row-group stats, which is 90+ seconds against an Overture-scale tree on S3. Iceberg V3's per-file geometry bounds in the manifest are the right architectural fix, but DuckDB 1.5.3 (May 20 2026) shipped V3 geo read support with the bound deserializer still incomplete. This repo isolates that experiment from the prototype so it can move at its own pace, attract collaborators, and accumulate cross-engine evidence for upstream conversations.
+In the [`tilerPrototype`](https://github.com/jatorre/tilerPrototype) work the practical wall against GeoParquet for "many files, fast bbox query" was always: DuckDB has to walk every file's footer to evaluate row-group stats — 90+ seconds against an Overture-scale tree on S3. Iceberg V3's per-file geometry bounds in the manifest are the right architectural fix, but engine support is incomplete and inconsistent. This repo isolates the cross-engine verification from the prototype so it can collect collaborators and drive upstream conversations on its own pace.
 
 ## Contributing
 
-Open an issue with the engine, version, and minimal repro. PRs welcome for new engine runners or for upstream fixes that land back here as "now passes" rows.
+Open an issue with the engine, version, and minimal repro. PRs welcome for new engine runners, for upstream fixes that land back here as "now passes" rows, or for filling in the `❓` cells in the matrix.
 
 ## License
 
