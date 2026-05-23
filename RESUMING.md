@@ -40,6 +40,27 @@ Tried two accounts, both blocked. Full diagnostic in
 Next step is filing a Snowflake support ticket — we've ruled out everything
 external (IAM, bucket region, our metadata, catalog integration choice).
 
+## Databricks — checked, two blockers
+
+DBSQL `2026.10` on a GCP-hosted workspace.
+
+- **Structural**: Databricks Iceberg requires a catalog server (Unity,
+  Glue, Iceberg REST, Snowflake Horizon). There is no path to read a
+  static `metadata.json` directly — `LOCATION` isn't supported on Iceberg
+  tables, and the `metadata_location` option silently creates an empty
+  Delta table. So our shared `gs://cartobq-iceberg-geo-testbed/` fixtures
+  are unreadable from Databricks without standing up a foreign catalog.
+- **V3 type**: even self-managed,
+  `CREATE TABLE … geom GEOMETRY USING ICEBERG TBLPROPERTIES('format-version'='3')`
+  errors with `[UNSUPPORTED_DATATYPE]`. Same for `GEOGRAPHY`. The DBSQL
+  parser doesn't recognize the V3 geo-column tokens. `ST_*` functions
+  exist and run, but they return strings — no UDT registration.
+
+Net: V3 geometry on Databricks is L0 today, same end-state as BigQuery
+and Sedona. Worth re-testing after the next DBSQL release; Databricks has
+publicly committed to V3 geospatial. Full details in
+`engines/databricks/README.md`.
+
 ## Sedona — done (with a twist)
 
 Sedona 1.6.1 + iceberg-spark-runtime 1.7.1 on Spark 3.4.1, via the
