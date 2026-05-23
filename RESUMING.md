@@ -27,18 +27,18 @@ Tried two accounts, both blocked. Full diagnostic in
   can't `CREATE EXTERNAL VOLUME` (needs ACCOUNTADMIN).
 - **Account B** (`KJEIDXA-IK05112`, personal trial, GCP_EUROPE_WEST2): we
   have ACCOUNTADMIN, the external volume verifies clean, but **every**
-  `CREATE ICEBERG TABLE` (managed and unmanaged) errors with
-  `091369: Query needs to be retried to setup external volume`. Retries
-  don't help. No deeper error in `QUERY_HISTORY`. Reproduces with
-  Snowflake-managed Iceberg too, so it's not our metadata.
+  `CREATE ICEBERG TABLE` (managed *and* unmanaged) errors with
+  `091369: Query needs to be retried to setup external volume`.
+  `SNOWFLAKE.MONITORING.ICEBERG_ACCESS_ERRORS` is empty for the fresh
+  volume — so 091369 is upstream of the GCS call, internal to Snowflake.
+  Worth knowing: when the SA *didn't* have `objectAdmin` on the bucket,
+  that view *did* log a `403 storage.objects.create` from GCS — confirming
+  Snowflake's Iceberg provisioning DOES require write perms on the bucket
+  even for read-only Iceberg tables. Once we granted the SA `objectAdmin`,
+  cloud-side errors stopped but 091369 persists.
 
-Next-step options when picking this up:
-1. Open the Snowsight UI on account B — the create-table wizard sometimes
-   surfaces a setup banner the SQL-only path doesn't.
-2. File a Snowflake support ticket with error 091369. Repro SQL is in
-   `engines/snowflake/_provision.py` + the comments in the README.
-3. Try a Snowflake account on AWS — the GCP fresh-account setup may have
-   a known issue this avoids.
+Next step is filing a Snowflake support ticket — we've ruled out everything
+external (IAM, bucket region, our metadata, catalog integration choice).
 
 ## Sedona — done (with a twist)
 

@@ -42,12 +42,21 @@ What does **not** work:
   rebuild of the volume + catalog + database with fresh names,
   `CATALOG='SNOWFLAKE'` (managed) vs `CATALOG='ICEBERG_FILES'` (unmanaged),
   cross-region US bucket vs same-region EU bucket. The error is identical
-  in every case. Snowflake's `INFORMATION_SCHEMA.QUERY_HISTORY` returns the
-  same unhelpful message — there's no deeper error to surface.
+  in every case.
+
+  We confirmed via `SNOWFLAKE.MONITORING.ICEBERG_ACCESS_ERRORS` that
+  Snowflake is **not** logging any cloud-storage error for the failing
+  CREATE — zero rows for `ICEBERG_VOL_FRESH`. So 091369 fires upstream of
+  the GCS call, in Snowflake's internal Iceberg-table provisioning state
+  machine. (For comparison: an earlier attempt against `ICEBERG_TESTBED_VOLUME`
+  did log a real `403 Forbidden: storage.objects.create` from GCS into the
+  same view — that's how we discovered Snowflake needs `objectAdmin` on
+  the bucket even for "read-only" Iceberg tables.)
 
   Since the error reproduces for **Snowflake-managed Iceberg too**, the
-  blocker is not in our hand-written metadata. It's something in Snowflake's
-  fresh-account Iceberg setup pipeline.
+  blocker is not in our hand-written metadata. With `VERIFY_EXTERNAL_VOLUME`
+  passing and zero cloud-side errors, the next step is a Snowflake support
+  ticket against the account-side Iceberg provisioning pipeline.
 
 ## What works for someone with a non-blocked account
 
