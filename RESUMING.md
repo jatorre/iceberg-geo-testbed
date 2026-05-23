@@ -40,11 +40,28 @@ Next-step options when picking this up:
 3. Try a Snowflake account on AWS — the GCP fresh-account setup may have
    a known issue this avoids.
 
-## Sedona (untouched)
+## Sedona — done (with a twist)
 
-The reference implementation. Highest validation value: produce the same
-fixtures via Sedona's V3 writer and diff-avro against our manifest avro to
-confirm canonical bound encoding.
+Sedona 1.6.1 + iceberg-spark-runtime 1.7.1 on Spark 3.4.1, via the
+`apache/sedona:1.6.1` Docker image.
+
+- **Probing our hand-written fixtures**: v2_flat=L3, v2_struct=L3 (prunes
+  through struct fields, matching BigQuery), v3=L0. The v3 read error is
+  the same shape as BigQuery's: `Cannot parse type string to primitive:
+  geometry(OGC:CRS84)`. Confirms our hand-written V3 metadata is ahead of
+  what the official toolchain accepts.
+- **Ground-truth manifest diff** (the original motivation): Sedona's
+  Iceberg-Spark writer produces a V2 manifest with **bit-identical
+  little-endian IEEE 754 doubles** for numeric `lower_bounds`/
+  `upper_bounds`. Validates our hand-written encoding.
+- **Sedona can't write V3 geometry either**: `iceberg-spark-runtime 1.7.1`
+  rejects Sedona's Geometry UDT at the `SparkTypeVisitor` layer with
+  `UnsupportedOperationException: User-defined types are not supported`.
+  So Sedona is not yet the "reference V3 writer" we hoped — there's a real
+  upstream gap in `iceberg-spark` itself.
+
+`engines/sedona/run.sh build|probe` is the entry point; details in
+`engines/sedona/README.md`.
 
 ## DuckDB upstream PRs
 
