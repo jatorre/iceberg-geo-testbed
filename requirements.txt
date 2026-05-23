@@ -1,0 +1,3 @@
+pyiceberg[pyarrow]>=0.11.1
+pyarrow>=17.0
+shapely>=2.0
