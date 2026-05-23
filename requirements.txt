@@ -3,3 +3,4 @@ pyarrow>=17.0
 shapely>=2.0
 snowflake-connector-python>=4.5.0
 databricks-sql-connector>=4.2.0
+oracledb>=4.0.0

@@ -61,6 +61,28 @@ and Sedona. Worth re-testing after the next DBSQL release; Databricks has
 publicly committed to V3 geospatial. Full details in
 `engines/databricks/README.md`.
 
+## Oracle — checked, blocked at metadata parse
+
+Oracle AI Database **26ai** `23.26.2.2.0` on Autonomous Database
+(Always Free tier), via `python-oracledb` thin mode with the wallet from
+the same gcloud secret as the other engines.
+
+Network/public-bucket access works once you grant outbound HTTPS to
+`storage.googleapis.com` via `DBMS_NETWORK_ACL_ADMIN.APPEND_HOST_ACE` —
+`DBMS_CLOUD.LIST_OBJECTS` returns parquet file names correctly.
+
+But `DBMS_CLOUD.CREATE_EXTERNAL_TABLE` with `protocol_type=iceberg` fails
+identically for all three fixtures: `ORA-20000: Iceberg parameter error /
+Failed to generate column list`. Tried URI variants (metadata.json vs
+table root), format-JSON variants, `gs://` vs `https://` inside the
+metadata. Same error every time. Oracle's docs name Spark/Athena/Snowflake
+as the supported producers — apparently pyiceberg's manifest layout isn't
+one Oracle's parser accepts. Sedona populates additional optional fields
+(`column_sizes`, `value_counts`, `null_value_counts`, string column
+bounds) that we skip; one of those may be Oracle-required.
+
+Details in `engines/oracle/README.md`.
+
 ## Sedona — done (with a twist)
 
 Sedona 1.6.1 + iceberg-spark-runtime 1.7.1 on Spark 3.4.1, via the
