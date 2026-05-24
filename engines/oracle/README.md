@@ -10,7 +10,19 @@ wallet from the `carto-dev-database-credentials` gcloud secret.
 Oracle's Iceberg reader **rejects pyiceberg-emitted metadata** with the
 generic error `ORA-20000: Iceberg parameter error / Failed to generate
 column list`, despite the same files being readable by DuckDB, BigQuery,
-and Sedona/Iceberg-Spark.
+and Sedona/Iceberg-Spark (and **registered cleanly in Apache Polaris**
+— the reference open-source REST catalog).
+
+So the metadata is spec-compliant. Oracle's parser is stricter than the
+spec mandates. Per Oracle's docs, the supported producers are
+Spark/Athena/Snowflake — pyiceberg isn't on that list. The likely missing
+fields are the optional-by-spec metrics (`column_sizes`, `value_counts`,
+`null_value_counts`) that Spark-Iceberg's writer populates and Oracle
+treats as required.
+
+Oracle is **not in icebergmatrix.org's coverage** as of 2026-05-24, so
+this testbed appears to be the first cross-engine documentation of
+Oracle ADB's Iceberg-reader strictness.
 
 The rejection is consistent across:
 - All three fixtures (v2_flat_columns, v2_bbox_struct, v3_geometry).

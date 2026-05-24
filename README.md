@@ -22,17 +22,53 @@ it does.
 L4 is currently not measured by the runners — it would require digging into
 per-file row-group telemetry. Today the matrix tops out at L3.
 
+## Access pattern: the orthogonal axis
+
+There's a second dimension this testbed is opinionated about, separate
+from L0–L4: **how does the engine discover the table?** Two families:
+
+- **Static metadata + cloud storage** — the engine reads `metadata.json`
+  at a known URL and follows the manifest paths. DuckDB, BigQuery,
+  Sedona/Iceberg-Spark, Oracle ADB all expose this. Lowest-friction
+  interop, no extra infra.
+- **Catalog-mediated** — the engine talks to a catalog server (Iceberg
+  REST API, AWS Glue, Hive Metastore, etc.) which then hands it the
+  metadata pointer. Databricks Lakehouse Federation and Snowflake's
+  Horizon are this kind of consumer.
+
+This testbed is built around the static-metadata path because it's the
+most engine-agnostic and the easiest to share publicly (just a GCS
+bucket URL). Engines that *only* support catalog-mediated access show
+up as `n/a in this testbed` in the matrix below — they likely support
+V2/V3 fine via their preferred catalog, just not the testbed's bare-URL
+path. Per [icebergmatrix.org](https://icebergmatrix.org/) and the
+official docs:
+
+- **Databricks** consumes Iceberg only via **Unity Catalog, AWS Glue,
+  HMS, or Snowflake Horizon** — no generic REST consumer (we proved
+  this by trying `CREATE CONNECTION TYPE iceberg` / `ICEBERG_REST`,
+  both rejected as unsupported types).
+- **Oracle ADB**'s REST integration only recognizes specific cloud
+  endpoints (Snowflake-Polaris-hosted, AWS Glue) — not a self-hosted
+  REST endpoint at a raw IP.
+
+So a "Databricks blocked" cell in the matrix below is a *testbed
+methodology* result, not "Databricks doesn't support V2". Filling in
+those cells properly would require Glue or Horizon as a bridge — real
+work that's tangential to the V3 geometry question this testbed is
+asking.
+
 ## Conclusions matrix
 
-Last refreshed: **2026-05-23.** Cells show the highest level reached.
+Last refreshed: **2026-05-24.** Cells show the highest level reached.
 
 | Engine / version | V2 flat-bbox cols | V2 `bbox` struct | V3 native `geometry` |
 |---|---|---|---|
 | **DuckDB 1.5.3**       | **L3** — prunes to 1/10 files | **L2** — correct, but no file pruning (struct-field gap) | **L0** — registers + `COUNT(*)` works, but `SELECT geom` errors (BLOB→GEOMETRY cast + manifest-bound deserializer both missing). See [docs/duckdb-gap.md](docs/duckdb-gap.md). |
 | **BigQuery / BigLake** | **L3** — 32 KB scanned vs 320 KB baseline (1/10 files) | **L3** — prunes through struct fields too (improvement over DuckDB!) | **L0** — `CREATE EXTERNAL TABLE` rejects: `Unknown Iceberg type "geometry(OGC:CRS84)"`. See [engines/bigquery/README.md](engines/bigquery/README.md). |
-| **Snowflake**          | ⏸ blocked | ⏸ | ⏸ | Two accounts tried. CARTO dev (shared): can't `CREATE EXTERNAL VOLUME` from `TEST_ROLE`. Personal trial on GCP-EU: have ACCOUNTADMIN, external volume passes `VERIFY` (all of write/read/list/delete PASSED), `SNOWFLAKE.MONITORING.ICEBERG_ACCESS_ERRORS` is empty for the fresh volume — yet every `CREATE ICEBERG TABLE` (managed *or* unmanaged) fails with `091369`. Snowflake backend bug; needs a support ticket. See [engines/snowflake/README.md](engines/snowflake/README.md). |
+| **Snowflake**          | ⏸ blocked | ⏸ blocked | ⏸ blocked — two accounts tried. CARTO dev (shared): can't `CREATE EXTERNAL VOLUME` from `TEST_ROLE`. Personal trial on GCP-EU: have ACCOUNTADMIN, external volume passes `VERIFY` (all of write/read/list/delete PASSED), `SNOWFLAKE.MONITORING.ICEBERG_ACCESS_ERRORS` is empty for the fresh volume — yet every `CREATE ICEBERG TABLE` (managed *or* unmanaged) fails with `091369`. Snowflake backend bug; needs a support ticket. Per [icebergmatrix.org](https://icebergmatrix.org/) Snowflake claims `full` V3 geometry support in public preview — couldn't verify due to the bug. See [engines/snowflake/README.md](engines/snowflake/README.md). |
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | **L3** — 1 of 10 files | **L3** — prunes through struct fields | **L0** — `Cannot parse type string to primitive: geometry(OGC:CRS84)`. Sedona itself also can't *write* V3 geometry: `iceberg-spark-runtime` rejects Sedona's Geometry UDT (`UnsupportedOperationException: User-defined types are not supported`). Our V2 numeric bound encoding is bit-identical to Iceberg-Spark's. See [engines/sedona/README.md](engines/sedona/README.md). |
-| **Databricks (DBSQL 2026.10)** | n/a — structural | n/a | **L0** — `[UNSUPPORTED_DATATYPE] Unsupported data type "GEOMETRY"` (also rejects `GEOGRAPHY`). DBSQL can't read static `metadata.json` directly either (requires Iceberg REST / Glue / Unity Catalog mediation), so the v2 cells are "structural n/a". `ST_*` spatial functions exist but return strings, not typed geometries. See [engines/databricks/README.md](engines/databricks/README.md). |
+| **Databricks (DBSQL 2026.10)** | n/a in this testbed | n/a | **L0** — `[UNSUPPORTED_DATATYPE] Unsupported data type "GEOMETRY"` (also rejects `GEOGRAPHY`). Caveat on the V2 cells: Databricks **does** fully support reading Iceberg V2 — *but only via specific named catalog providers* (Unity, AWS Glue, Hive Metastore, Snowflake Horizon, per the [Databricks Iceberg announcement](https://www.databricks.com/blog/announcing-full-apache-iceberg-support-databricks)). It has *no* generic Iceberg REST catalog client and *no* static-`metadata.json`-on-bucket path. Our public-bucket testbed doesn't fit those slots without first re-registering tables in Glue or Horizon. `ST_*` spatial functions exist but return strings, not typed geometries. See [engines/databricks/README.md](engines/databricks/README.md). |
 | **Oracle ADB 26ai (23.26.2.2.0)** | **L0** | **L0** | **L0** — all three fail with `ORA-20000: Iceberg parameter error / Failed to generate column list`. Network + public-bucket access verified (`LIST_OBJECTS` works). Path-based Iceberg registration is the documented syntax — Oracle's reader just doesn't accept pyiceberg-emitted manifests. Spark/Athena/Snowflake-produced metadata is what Oracle tests against. See [engines/oracle/README.md](engines/oracle/README.md). |
 | **PyIceberg 0.11.1**   | reads | reads | ⚠️ V3 read landed; no `GeometryType` writer | Tracking [iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818). |
 | **DuckLake 1.0**       | — | — | "forthcoming" | Re-test each release. |
@@ -69,8 +105,28 @@ self-hosted Polaris endpoint:
 
 ### What you can already say from this
 
-- **V2 flat bbox columns work everywhere.** Both DuckDB and BigQuery prune
-  correctly. This is the path that's actually shippable today.
+This repo's findings cross-checked against
+[icebergmatrix.org](https://icebergmatrix.org/) — an independently
+maintained cross-engine Iceberg compatibility matrix that we discovered
+late in the session — line up cleanly on Databricks/BigQuery/PyIceberg
+V3 status, with two interesting deltas:
+
+- **icebergmatrix.org says DuckDB V3 geometry = `full`** ("GEOMETRY type
+  support added to the DuckDB Iceberg extension in v1.5.2"). Our
+  hands-on testing shows this is overstated: the type is parsed but the
+  manifest-bound deserializer + the BLOB→GEOMETRY parquet cast are both
+  missing, so anything beyond `SELECT COUNT(*)` errors. Filed as
+  [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002).
+- **Oracle ADB isn't in icebergmatrix.org at all.** This testbed appears
+  to be the first cross-engine documentation of Oracle's stricter
+  Iceberg-reader behavior (rejects pyiceberg-emitted manifests despite
+  same files being spec-compliant per Polaris).
+
+Other takeaways from the matrix runs themselves:
+
+- **V2 flat bbox columns work everywhere we could test (DuckDB, BigQuery,
+  Sedona).** Both DuckDB and BigQuery prune correctly. This is the
+  path that's actually shippable today.
 - **V2 struct-field pruning is engine-dependent.** DuckDB scans all 10 files
   when the predicate hits `bbox.xmin`; BigQuery prunes the same predicate to
   1. So "GeoParquet-1.1-style bbox struct" is *not* a portable pruning

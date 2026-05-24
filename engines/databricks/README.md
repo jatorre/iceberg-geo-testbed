@@ -6,18 +6,33 @@ the `carto-dev-database-credentials` gcloud secret.
 
 ## Headline finding
 
-Databricks **cannot read our hand-written static `metadata.json`** (the
-mode all the other engines we tested support). It requires a catalog
-server (Unity Catalog, Iceberg REST, AWS Glue, or Snowflake Horizon) to
-mediate Iceberg table discovery. There is no `CREATE TABLE ... USING
-ICEBERG LOCATION 'gs://.../v1.metadata.json'` path; the closest syntax
-silently creates an empty Delta table instead.
+Databricks fully supports Iceberg V2 reads — **but only through specific
+named catalog providers**. There is no generic Iceberg REST catalog
+client in DBSQL, and no static-`metadata.json`-on-cloud-storage path,
+both confirmed by independent sources:
+
+- Databricks's [own announcement blog](https://www.databricks.com/blog/announcing-full-apache-iceberg-support-databricks):
+  Catalog Federation supports "external catalogs such as **AWS Glue,
+  Hive Metastores, and Snowflake Horizon Catalog**" — that's the
+  exhaustive list.
+- [icebergmatrix.org](https://icebergmatrix.org/) `databricks:polaris:v2`:
+  `unknown — Databricks documentation does not mention Polaris catalog
+  integration`. The `databricks:rest-catalog:v2: full` cell is about
+  *Unity Catalog SERVING* the REST API, not consuming external ones.
+
+Our hands-on confirmed it: `CREATE CONNECTION TYPE iceberg` and
+`CREATE CONNECTION TYPE ICEBERG_REST` both error with
+`CONNECTION_TYPE_NOT_SUPPORTED`. The full list of supported connection
+types is iceberg-free except for AWS `GLUE`.
 
 > *"Iceberg tables in Unity Catalog do not support a LOCATION clause."*
 > — [Databricks docs on Iceberg](https://docs.databricks.com/aws/en/iceberg/)
 
-So the "point at our metadata, see what happens" probe we ran against
-DuckDB / BigQuery / Sedona is structurally unavailable here.
+This isn't a quirk of our test — it's an explicit Databricks product
+gap. To get our metadata into Databricks would require *first*
+registering the tables in Glue, HMS, or Snowflake Horizon, then
+federating. That's significant cross-cloud setup, tangential to the
+V3 geometry question this testbed is asking.
 
 ## What we did test: Databricks-managed V3
 
