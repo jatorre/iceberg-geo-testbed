@@ -167,6 +167,13 @@ def write_static_catalog(
         "snapshot-log": [{"snapshot-id": snapshot_id, "timestamp-ms": snapshot_id}],
         "metadata-log": [],
     }
+    # V3 introduces row lineage. `next-row-id` is required even on tables that
+    # don't use row IDs — Apache Polaris validates this strictly (the other
+    # engines we tested are more permissive). Caught by trying to register
+    # the v3_geometry fixture in a Polaris REST catalog.
+    if format_version_in_metadata >= 3:
+        metadata["next-row-id"] = 0
+        metadata["row-lineage"] = False
     metadata_json_path = meta_dir / "v1.metadata.json"
     metadata_json_path.write_text(json.dumps(metadata, indent=2))
     return metadata_json_path

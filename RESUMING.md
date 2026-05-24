@@ -83,6 +83,35 @@ bounds) that we skip; one of those may be Oracle-required.
 
 Details in `engines/oracle/README.md`.
 
+## Polaris — reference catalog as spec validator
+
+Spun up Apache Polaris (Snowflake-donated open-source Iceberg REST
+catalog) on a GCE `e2-small` VM at `136.112.253.147:8181`. Used it as
+an oracle for spec compliance.
+
+- **V2 fixtures registered cleanly** → our V2 metadata is genuinely
+  spec-compliant. Oracle's rejection is an Oracle-side issue.
+- **V3 fixture initially returned 400 — `missing long: next-row-id`.**
+  pyiceberg 0.11.1 omits this V3-required field. Patched
+  `testbed/_static_catalog.py` to emit `next-row-id: 0` + `row-lineage:
+  false` when `format_version_in_metadata=3`. V3 now also returns 200.
+
+Polaris should be the regression gate for any future change to
+`_static_catalog.py` — re-run `engines/polaris/_setup.py` to confirm
+all three fixtures still register.
+
+We *also* tried using Polaris as a bridge for Oracle and Databricks
+(both of which need catalog mediation). Neither accepts our
+self-hosted Polaris:
+- Oracle's REST integration appears to only recognize specific
+  Snowflake-hosted Polaris and AWS Glue endpoints.
+- Databricks's `CREATE CONNECTION TYPE iceberg` errors with
+  `CONNECTION_TYPE_NOT_SUPPORTED`.
+
+Polaris VM is at `136.112.253.147:8181` in `cartobq` (us-central1-a),
+running indefinitely. Tear down with `gcloud compute instances delete
+iceberg-polaris-testbed --zone=us-central1-a` when no longer needed.
+
 ## Sedona — done (with a twist)
 
 Sedona 1.6.1 + iceberg-spark-runtime 1.7.1 on Spark 3.4.1, via the

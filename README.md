@@ -37,6 +37,36 @@ Last refreshed: **2026-05-23.** Cells show the highest level reached.
 | **PyIceberg 0.11.1**   | reads | reads | ⚠️ V3 read landed; no `GeometryType` writer | Tracking [iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818). |
 | **DuckLake 1.0**       | — | — | "forthcoming" | Re-test each release. |
 
+### Sanity-check: our metadata against Apache Polaris
+
+We deployed Apache Polaris (the reference open-source Iceberg REST
+catalog, donated by Snowflake) on a GCE VM and tried to register all
+three fixtures.
+
+- **V2 fixtures: 200 OK.** Our hand-written V2 metadata is spec-compliant
+  by Polaris's standards.
+- **V3 fixture initially returned 400** — `Cannot parse missing long:
+  next-row-id`. pyiceberg 0.11.1 doesn't emit the V3-required
+  `next-row-id` / `row-lineage` fields. Patched `_static_catalog.py`
+  to emit them when `format_version_in_metadata=3`; V3 now also returns
+  200 OK on registration.
+
+So Polaris caught a real V3 spec gap that no other engine we tested
+flagged (they all reject the V3 metadata higher up — at the geometry
+type token — before reaching `next-row-id` validation). Worth running
+`engines/polaris/_setup.py` whenever `_static_catalog.py` changes. See
+[engines/polaris/README.md](engines/polaris/README.md).
+
+We also tried using Polaris as a *bridge* for Oracle and Databricks
+(both of which require catalog-mediated access). Neither accepts a
+self-hosted Polaris endpoint:
+
+- Oracle ADB's REST-catalog support seems to only recognize known cloud
+  endpoints (Snowflake-Polaris, AWS Glue) — not generic
+  Iceberg-REST-at-an-IP.
+- Databricks's `CREATE CONNECTION TYPE iceberg` errors with
+  `CONNECTION_TYPE_NOT_SUPPORTED` (Glue/Unity/Snowflake-Horizon only).
+
 ### What you can already say from this
 
 - **V2 flat bbox columns work everywhere.** Both DuckDB and BigQuery prune
