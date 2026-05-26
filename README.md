@@ -9,9 +9,10 @@ This repository contains four things, in order of what you probably came for:
    storing geospatial data in Iceberg V2 tables so engines today deliver
    file-level pruning on spatial queries without waiting for Iceberg V3
    geometry types to mature.
-2. **[STATUS.md](./STATUS.md)** — living per-engine support table for
-   each GeoIceberg V2 capability (which engines have which optimizations,
-   what would need to change to flip each cell).
+2. **[STATUS_V2.md](./STATUS_V2.md)** and **[STATUS_V3.md](./STATUS_V3.md)** —
+   two living per-engine support tables. V2 tracks the GeoIceberg V2
+   convention's capabilities; V3 tracks engine implementation of
+   Iceberg V3's native geometry/geography types.
 3. **The matrix** (in this file, below) — measured Iceberg geospatial
    support across DuckDB, BigQuery, Sedona / Iceberg-Spark, Snowflake,
    Databricks, and Oracle ADB on an L0–L4 ladder.
@@ -164,7 +165,8 @@ Other takeaways from the matrix runs themselves:
 
 ```
 SPEC.md                      # GeoIceberg V2 — the recommended convention
-STATUS.md                    # Living per-engine support table
+STATUS_V2.md                 # Living per-engine support for GeoIceberg V2
+STATUS_V3.md                 # Living per-engine support for Iceberg V3 native geo
 BLOG_POST.md                 # Narrative writeup
 README.md                    # This file
 

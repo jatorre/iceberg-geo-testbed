@@ -278,11 +278,15 @@ public fixture at
 `gs://cartobq-iceberg-geo-testbed/v2_geo_convention/` is a live
 example you can register in any compatible engine.
 
-**[STATUS.md](./STATUS.md) is the living engine-support table** —
-per-engine cells for each capability defined in this spec (R1 static
-metadata, R2 bbox-col pruning, R3 WKB readback, R4 `geo` property
-visible, O1 auto-derive bbox). Check there before assuming an engine
-delivers a particular optimization.
+**[STATUS_V2.md](./STATUS_V2.md) is the living engine-support table
+for this convention** — per-engine cells for each capability defined
+in this spec (R1 static metadata, R2 bbox-col pruning, R3 WKB
+readback, R4 `geo` property visible, O1 auto-derive bbox). Check
+there before assuming an engine delivers a particular optimization.
+
+The companion **[STATUS_V3.md](./STATUS_V3.md)** tracks engine support
+for *Iceberg V3 native* geometry/geography types — the eventual target
+this convention is bridging to.
 
 ---
 

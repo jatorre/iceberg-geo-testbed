@@ -3,10 +3,17 @@
 **Last verified: 2026-05-26.** Living document; PRs welcome.
 
 This table tracks each engine's implementation status against the
-capabilities defined in [SPEC.md](./SPEC.md). It's complementary to
-the L0–L4 fixture matrix in [README.md](./README.md) — the README
-matrix measures what we observed end-to-end; this document measures
-each *individual capability* the spec calls out.
+capabilities defined in [SPEC.md](./SPEC.md) — the V2-era convention
+that delivers file-level spatial pruning today using flat bbox columns
++ a WKB column.
+
+Companion file: **[STATUS_V3.md](./STATUS_V3.md)** tracks engine
+support for *Iceberg V3 native* geometry/geography types — the
+eventual target this convention bridges to.
+
+The README's L0–L4 matrix measures end-to-end query behavior across
+fixtures; this document measures each *individual capability* the V2
+spec calls out.
 
 ## Capability legend
 
