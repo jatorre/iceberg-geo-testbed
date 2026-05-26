@@ -1,6 +1,22 @@
 # Picking up where we left off
 
-State as of **2026-05-23.**
+State as of **2026-05-26.**
+
+## Headline deliverables (now in place)
+
+1. **`SPEC.md`** — *GeoIceberg V2*, the proposed recommended convention
+   for V2 Iceberg tables that delivers file-level spatial pruning today.
+   Free-form column names with a discoverable `geo` table property
+   mirroring GeoParquet 1.1's structure. Migration path to V3 native.
+2. **`BLOG_POST.md`** — narrative writeup for promoting the work.
+   Tells the story of the engine matrix → the V3 gap finding → the
+   convention proposal → call to action for adopters + engine PRs.
+3. **`README.md`** — restructured so the spec is the lede; matrix is
+   evidence; everything reproducible from the public bucket.
+4. **`testbed/v2_geo_convention.py`** — the reference implementation
+   of the spec. DuckDB tested at L3 file pruning with custom column
+   names (proves Iceberg's manifest pruning is column-ID-based, free
+   of any "must be named xmin" requirement).
 
 ## What's done
 

@@ -1,66 +1,54 @@
 # iceberg-geo-testbed
 
-A cross-engine testbed for **Apache Iceberg geospatial support** — V2 and V3 — plus the adjacent GeoParquet path. The goal is one reproducible place to ask, per engine: *can it query geo data through Iceberg today, and does it prune files for spatial predicates?*
+**A proposed convention for geospatial data on Apache Iceberg V2 — and the
+cross-engine testbed that proves it works.**
 
-> Iceberg V3 (mid-2025) introduced native `geometry`/`geography` types with per-file `lower_bounds`/`upper_bounds` in the manifest. The spec promises that a query like `WHERE ST_Intersects(geom, bbox)` can prune non-overlapping files before touching their data. This repo verifies who actually delivers.
+This repository contains three things, in order of what you probably came for:
 
-## Support ladder
+1. **[SPEC.md](./SPEC.md)** — *GeoIceberg V2*, a proposed convention for
+   storing geospatial data in Iceberg V2 tables so engines today deliver
+   file-level pruning on spatial queries without waiting for Iceberg V3
+   geometry types to mature.
+2. **The matrix** — measured Iceberg geospatial support across DuckDB,
+   BigQuery, Sedona / Iceberg-Spark, Snowflake, Databricks, and Oracle ADB.
+3. **The reproducible fixtures** — public GCS bucket
+   `gs://cartobq-iceberg-geo-testbed/` and Python builders that anyone can
+   re-run.
 
-We rate each (engine × fixture) cell on a five-level ladder. A given engine
-can fall off the ladder for different reasons in V2 vs V3, which is exactly
-the point — the matrix tells you *where* support breaks, not just whether
-it does.
+The narrative writeup is in [BLOG_POST.md](./BLOG_POST.md).
 
-| Level | What it means | Failure mode below this level |
-|---|---|---|
-| **L0** | Engine cannot read the table | Table won't register, or geom column can't be materialized (cast gaps, type rejection) |
-| **L1** | Table reads end-to-end | `SELECT *` returns rows including geo columns |
-| **L2** | Spatial predicate is correct | `WHERE ST_Intersects(...)` (or equivalent V2 bbox SQL) returns the right rows, regardless of perf |
-| **L3** | File-level pruning works | Manifest `lower_bounds`/`upper_bounds` actually narrow the scan to non-overlapping files |
-| **L4** | Row-group / page pruning | Parquet column stats further narrow the scan *inside* the surviving files |
+---
 
-L4 is currently not measured by the runners — it would require digging into
-per-file row-group telemetry. Today the matrix tops out at L3.
+## TL;DR
 
-## Access pattern: the orthogonal axis
+> *Apache Iceberg V3 was announced in mid-2025 with native `geometry`
+> types and per-file geometry bounds in the manifest. As of mid-2026
+> no engine we tested supports V3 geometry end-to-end. In the
+> meantime, here is a portable V2 convention that gets you file-level
+> spatial pruning across every Iceberg engine we tested — modelled
+> directly on how GeoParquet 1.1 solved the same problem at the
+> Parquet layer.*
 
-There's a second dimension this testbed is opinionated about, separate
-from L0–L4: **how does the engine discover the table?** Two families:
+The convention adds, for each geometry column:
 
-- **Static metadata + cloud storage** — the engine reads `metadata.json`
-  at a known URL and follows the manifest paths. DuckDB, BigQuery,
-  Sedona/Iceberg-Spark, Oracle ADB all expose this. Lowest-friction
-  interop, no extra infra.
-- **Catalog-mediated** — the engine talks to a catalog server (Iceberg
-  REST API, AWS Glue, Hive Metastore, etc.) which then hands it the
-  metadata pointer. Databricks Lakehouse Federation and Snowflake's
-  Horizon are this kind of consumer.
+- A `geom_wkb BINARY` column (WKB payload)
+- Four `DOUBLE` bbox columns (`xmin/ymin/xmax/ymax`) — these are what
+  Iceberg's manifest prunes on
+- A `geo` table property declaring CRS, edges, encoding, and which
+  columns are bbox vs payload (same JSON shape as GeoParquet 1.1's
+  `geo` metadata)
 
-This testbed is built around the static-metadata path because it's the
-most engine-agnostic and the easiest to share publicly (just a GCS
-bucket URL). Engines that *only* support catalog-mediated access show
-up as `n/a in this testbed` in the matrix below — they likely support
-V2/V3 fine via their preferred catalog, just not the testbed's bare-URL
-path. Per [icebergmatrix.org](https://icebergmatrix.org/) and the
-official docs:
+Migrate to V3's native typed `geometry` column later via `ALTER TABLE
+ADD COLUMN` when your engines support it — the two paths coexist.
 
-- **Databricks** consumes Iceberg only via **Unity Catalog, AWS Glue,
-  HMS, or Snowflake Horizon** — no generic REST consumer (we proved
-  this by trying `CREATE CONNECTION TYPE iceberg` / `ICEBERG_REST`,
-  both rejected as unsupported types).
-- **Oracle ADB**'s REST integration only recognizes specific cloud
-  endpoints (Snowflake-Polaris-hosted, AWS Glue) — not a self-hosted
-  REST endpoint at a raw IP.
+See [SPEC.md](./SPEC.md) for the full normative document.
 
-So a "Databricks blocked" cell in the matrix below is a *testbed
-methodology* result, not "Databricks doesn't support V2". Filling in
-those cells properly would require Glue or Horizon as a bridge — real
-work that's tangential to the V3 geometry question this testbed is
-asking.
+---
 
-## Conclusions matrix
+## The matrix
 
-Last refreshed: **2026-05-24.** Cells show the highest level reached.
+Last refreshed: **2026-05-26.** Cells show the highest level reached on the
+five-level support ladder (defined below).
 
 | Engine / version | V2 flat-bbox cols | V2 `bbox` struct | V3 native `geometry` |
 |---|---|---|---|
@@ -73,11 +61,45 @@ Last refreshed: **2026-05-24.** Cells show the highest level reached.
 | **PyIceberg 0.11.1**   | reads | reads | ⚠️ V3 read landed; no `GeometryType` writer | Tracking [iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818). |
 | **DuckLake 1.0**       | — | — | "forthcoming" | Re-test each release. |
 
-### Sanity-check: our metadata against Apache Polaris
+### Support ladder
 
-We deployed Apache Polaris (the reference open-source Iceberg REST
-catalog, donated by Snowflake) on a GCE VM and tried to register all
-three fixtures.
+| Level | What it means | Failure mode below this level |
+|---|---|---|
+| **L0** | Engine cannot read the table | Table won't register, or geom column can't be materialized (cast gaps, type rejection) |
+| **L1** | Table reads end-to-end | `SELECT *` returns rows including geo columns |
+| **L2** | Spatial predicate is correct | `WHERE ST_Intersects(...)` (or equivalent V2 bbox SQL) returns the right rows, regardless of perf |
+| **L3** | File-level pruning works | Manifest `lower_bounds`/`upper_bounds` actually narrow the scan to non-overlapping files |
+| **L4** | Row-group / page pruning | Parquet column stats further narrow the scan *inside* the surviving files |
+
+L4 is currently not measured by the runners.
+
+### Access pattern: the orthogonal axis
+
+There's a second dimension this testbed is opinionated about, separate
+from L0–L4: **how does the engine discover the table?** Two families:
+
+- **Static metadata + cloud storage** — the engine reads `metadata.json`
+  at a known URL and follows the manifest paths. DuckDB, BigQuery,
+  Sedona/Iceberg-Spark, Oracle ADB all expose this. Lowest-friction
+  interop, no extra infra. **This is the path GeoIceberg V2 is designed
+  around.**
+- **Catalog-mediated** — the engine talks to a catalog server (Iceberg
+  REST API, AWS Glue, Hive Metastore, etc.) which then hands it the
+  metadata pointer. Databricks's Lakehouse Federation and Snowflake's
+  Horizon are this kind of consumer.
+
+Engines that *only* support catalog-mediated access show up as `n/a in
+this testbed` in the matrix. Filling in those cells properly would
+require Glue or Horizon as a bridge — real work that's tangential to
+the V3 geometry question this testbed is asking.
+
+---
+
+## Sanity-check: our metadata against Apache Polaris
+
+While debugging the engine-specific failures we deployed Apache Polaris
+(the reference open-source Iceberg REST catalog, donated by Snowflake)
+on a GCE VM and tried to register all three fixtures.
 
 - **V2 fixtures: 200 OK.** Our hand-written V2 metadata is spec-compliant
   by Polaris's standards.
@@ -103,42 +125,139 @@ self-hosted Polaris endpoint:
 - Databricks's `CREATE CONNECTION TYPE iceberg` errors with
   `CONNECTION_TYPE_NOT_SUPPORTED` (Glue/Unity/Snowflake-Horizon only).
 
-### What you can already say from this
+### Takeaways
 
-This repo's findings cross-checked against
-[icebergmatrix.org](https://icebergmatrix.org/) — an independently
-maintained cross-engine Iceberg compatibility matrix that we discovered
-late in the session — line up cleanly on Databricks/BigQuery/PyIceberg
-V3 status, with two interesting deltas:
+Cross-checked against [icebergmatrix.org](https://icebergmatrix.org/) —
+an independently maintained cross-engine Iceberg compatibility matrix —
+the findings line up cleanly on Databricks/BigQuery/PyIceberg V3 status,
+with two interesting deltas:
 
-- **icebergmatrix.org says DuckDB V3 geometry = `full`** ("GEOMETRY type
-  support added to the DuckDB Iceberg extension in v1.5.2"). Our
-  hands-on testing shows this is overstated: the type is parsed but the
+- **icebergmatrix.org says DuckDB V3 geometry = `full`**. Our hands-on
+  testing shows this is overstated: type is parsed but the
   manifest-bound deserializer + the BLOB→GEOMETRY parquet cast are both
   missing, so anything beyond `SELECT COUNT(*)` errors. Filed as
   [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002).
 - **Oracle ADB isn't in icebergmatrix.org at all.** This testbed appears
   to be the first cross-engine documentation of Oracle's stricter
-  Iceberg-reader behavior (rejects pyiceberg-emitted manifests despite
-  same files being spec-compliant per Polaris).
+  Iceberg-reader behavior.
 
 Other takeaways from the matrix runs themselves:
 
-- **V2 flat bbox columns work everywhere we could test (DuckDB, BigQuery,
-  Sedona).** Both DuckDB and BigQuery prune correctly. This is the
-  path that's actually shippable today.
-- **V2 struct-field pruning is engine-dependent.** DuckDB scans all 10 files
-  when the predicate hits `bbox.xmin`; BigQuery prunes the same predicate to
-  1. So "GeoParquet-1.1-style bbox struct" is *not* a portable pruning
-  strategy — engines vary.
-- **V3 native geometry is not yet ready in either engine measured.** DuckDB
-  has a bound-deserializer gap with a clear upstream fix path; BigQuery's
-  BigLake reader doesn't know the type token at all.
+- **V2 flat bbox columns work everywhere we could test (DuckDB,
+  BigQuery, Sedona).** The path that's actually shippable today — and
+  the path GeoIceberg V2 prescribes.
+- **V2 struct-field pruning is engine-dependent.** DuckDB scans all 10
+  files when the predicate hits `bbox.xmin`; BigQuery and Sedona prune
+  it to 1. So the GeoParquet-1.1-style bbox struct is *not* a portable
+  Iceberg pruning strategy. Flat columns are.
+- **V3 native geometry is not yet ready in any engine we tested.**
+  DuckDB has a bound-deserializer gap with a clear upstream fix path;
+  every other engine rejects the type token earlier than that.
 
-### Adjacent: GeoParquet (no Iceberg)
+---
 
-Same engines, just `read_parquet(...)` directly. Documented here because
-it's the alternative path our consumers actually use today.
+## What's in this repo
+
+```
+SPEC.md                      # GeoIceberg V2 — the recommended convention
+BLOG_POST.md                 # Narrative writeup
+README.md                    # This file
+
+testbed/                     # Engine-agnostic fixture builders
+  common.py                  # 10-region synthetic data + bound encodings
+  _static_catalog.py         # Hand-writes metadata.json + manifest avro
+  v2_flat_columns.py         # V2 with flat xmin/ymin/xmax/ymax columns
+  v2_bbox_struct.py          # V2 with GeoParquet-1.1-style bbox struct
+  v2_geo_convention.py       # The reference impl of SPEC.md
+  v3_geometry.py             # V3 with native geometry(OGC:CRS84) column
+
+engines/
+  duckdb/run.py              # Local DuckDB CLI runner (working)
+  bigquery/run.py            # BigLake external tables via bq CLI (working)
+  sedona/                    # Spark + Sedona in Docker (working)
+  snowflake/                 # Discovery + provision; account-bug blocked
+  databricks/                # Discovery + V3 type probe (L0 confirmed)
+  oracle/                    # Discovery + path-based probe (L0 confirmed)
+  polaris/                   # Reference REST catalog on a GCE VM (validator)
+
+docs/
+  duckdb-gap.md              # Source-level analysis of the DuckDB 1.5.3 gap
+  encoding.md                # V3 geometry bound byte layout per spec
+  engine-matrix.md           # Detailed per-engine notes
+```
+
+---
+
+## Public fixtures
+
+Three reference fixtures, plus the convention reference, live in a
+public GCS bucket so any engine can read them without needing this
+codebase:
+
+```
+gs://cartobq-iceberg-geo-testbed/v2_flat_columns/metadata/v1.metadata.json
+gs://cartobq-iceberg-geo-testbed/v2_bbox_struct/metadata/v1.metadata.json
+gs://cartobq-iceberg-geo-testbed/v3_geometry/metadata/v1.metadata.json
+gs://cartobq-iceberg-geo-testbed/v2_geo_convention/metadata/v1.metadata.json
+```
+
+Each fixture has the same 10,000 rows (10 disjoint regions × 1000
+synthetic points each). The California-window probe should narrow to
+1 file for any engine that prunes manifest bounds correctly.
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/jatorre/iceberg-geo-testbed
+cd iceberg-geo-testbed
+brew install duckdb              # ≥ 1.5.3
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Build local fixtures (deterministic across processes; ~196 expected rows)
+python -m testbed.v2_flat_columns
+python -m testbed.v2_bbox_struct
+python -m testbed.v2_geo_convention   # the SPEC.md reference implementation
+python -m testbed.v3_geometry
+
+# Run engine probes
+python engines/duckdb/run.py
+python engines/bigquery/run.py   # needs `gcloud auth login`
+
+# Re-stage the public GCS bucket only if you changed the fixtures
+python engines/bigquery/_setup.py
+```
+
+For Sedona, Polaris, and the cloud-engine discovery scripts, see each
+engine's README under `engines/`.
+
+---
+
+## How the tests work
+
+Each fixture builds a tiny **static Iceberg catalog** — `metadata.json`
++ manifest avro on disk, no live catalog server — over 10 disjoint
+world regions × 1000 synthetic rows each. A correct file-level pruner
+narrows the California-window probe query to **one** file.
+
+The fixture seed is derived from `hashlib.sha256(region_name)` so
+rebuilds across different Python processes produce byte-identical
+parquet files — otherwise probe row counts would drift between engine
+runs. The California-window probe always returns **196** rows.
+
+For DuckDB we grep `Total Files Read:` from `EXPLAIN ANALYZE`. For
+BigQuery we compare `total_bytes_processed` against the predicted
+"1 file" and "all 10 files" sizes (each row is fixed-width —
+`1000 × 8 × N_cols` bytes per file uncompressed).
+
+---
+
+## Adjacent: GeoParquet (no Iceberg)
+
+Same engines, just `read_parquet(...)` directly. Documented here
+because it's the alternative path our consumers actually use today.
 
 | Engine | GeoParquet 1.1 per-row-group bbox | File-level pruning across many files |
 |---|---|---|
@@ -146,99 +265,21 @@ it's the alternative path our consumers actually use today.
 | **Snowflake** | ❓ | ❓ |
 | **BigQuery** | ❓ | ❓ |
 
-The motivating problem: ~90s cold for an SF-bbox query over the 512-file
-Overture buildings dataset on DuckDB. Iceberg V3's per-file geometry bounds
-are the architectural fix; this repo tracks who has actually implemented it.
+The motivating problem: ~90s cold for an SF-bbox query over the
+512-file Overture buildings dataset on DuckDB. Iceberg V3's per-file
+geometry bounds are the architectural fix; the GeoIceberg V2
+convention is the bridge while V3 catches up.
 
-## What's in here
-
-```
-testbed/                     # Engine-agnostic test fixtures
-  v2_flat_columns.py         # V2 Iceberg with flat xmin/ymin/xmax/ymax + per-file bounds
-  v2_bbox_struct.py          # V2 with GeoParquet-1.1-style bbox struct column
-  v3_geometry.py             # V3 with native geometry(OGC:CRS84) column
-  common.py                  # 10-region fixture data + bound-encoding helpers
-  _static_catalog.py         # Hand-writes metadata.json + manifest avro + manifest-list
-
-engines/
-  duckdb/run.py              # Local DuckDB CLI (working)
-  bigquery/run.py            # BigLake external tables via the bq CLI (working)
-  snowflake/                 # Discovery only; new admin account being set up
-  sedona/                    # Planned — reference implementation
-  bigquery/_setup.py         # Build gs:// metadata + gsutil rsync to public bucket
-
-docs/
-  duckdb-gap.md              # Source-level analysis of the DuckDB 1.5.3 geometry-bound gap
-  encoding.md                # V3 geometry bound byte layout per spec
-  engine-matrix.md           # Detailed per-engine notes
-```
-
-## How the tests work
-
-Each fixture builds a tiny **static Iceberg catalog** — `metadata.json` +
-manifest avro on disk, no live catalog server — over 10 disjoint world
-regions × 1000 synthetic rows each. A correct file-level pruner narrows the
-California-window probe query to **one** file.
-
-The fixture seed is derived from `hashlib.sha256(region_name)` so rebuilds
-across different Python processes produce byte-identical parquet files —
-otherwise probe row counts would drift between engine runs. The
-California-window probe should always return **196** rows.
-
-For DuckDB we grep `Total Files Read:` from `EXPLAIN ANALYZE`. For BigQuery
-we compare `total_bytes_processed` against the predicted "1 file" and "all
-10 files" sizes (each row is fixed-width — `1000 × 8 × N_cols` bytes per
-file uncompressed).
-
-The fixtures are also staged to a public GCS bucket so other engines (and
-other people) can read the same metadata without re-running the build:
-
-```
-gs://cartobq-iceberg-geo-testbed/<table>/metadata/v1.metadata.json
-gs://cartobq-iceberg-geo-testbed/<table>/data/*.parquet
-```
-
-## Running it locally
-
-```bash
-brew install duckdb              # ≥ 1.5.3
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-# Build the three local fixture tables (DuckDB target)
-python -m testbed.v2_flat_columns
-python -m testbed.v2_bbox_struct
-python -m testbed.v3_geometry
-
-# DuckDB matrix
-python engines/duckdb/run.py
-
-# BigQuery matrix (needs `gcloud auth login` first; reads the public bucket)
-python engines/bigquery/run.py
-```
-
-To refresh the GCS bucket (only needed when you change the testbed code):
-
-```bash
-python engines/bigquery/_setup.py
-```
-
-## Why this exists
-
-In the [`tilerPrototype`](https://github.com/jatorre/tilerPrototype) work
-the practical wall against GeoParquet for "many files, fast bbox query"
-was always: DuckDB has to walk every file's footer to evaluate row-group
-stats — 90+ seconds against an Overture-scale tree on S3. Iceberg V3's
-per-file geometry bounds in the manifest are the right architectural fix,
-but engine support is incomplete and inconsistent. This repo isolates the
-cross-engine verification from the prototype so it can collect
-collaborators and drive upstream conversations on its own pace.
+---
 
 ## Contributing
 
-Open an issue with the engine, version, and minimal repro. PRs welcome for
-new engine runners, for upstream fixes that land back here as a level-up
-in the matrix, or for filling in the `❓` cells.
+Open an issue with the engine, version, and minimal repro. PRs welcome
+for new engine runners, for upstream fixes that land back here as a
+level-up in the matrix, or for filling in the `❓` cells.
+
+For the SPEC itself, the open questions are listed at the bottom of
+[SPEC.md](./SPEC.md). Feedback there is exactly what would help.
 
 ## License
 

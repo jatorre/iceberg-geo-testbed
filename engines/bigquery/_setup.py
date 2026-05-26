@@ -25,7 +25,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from testbed import v2_flat_columns, v2_bbox_struct, v3_geometry  # noqa: E402
+from testbed import v2_flat_columns, v2_bbox_struct, v3_geometry, v2_geo_convention  # noqa: E402
 
 
 BUCKET = os.environ.get("BUCKET", "cartobq-iceberg-geo-testbed")
@@ -35,6 +35,7 @@ FIXTURES = [
     ("v2_flat_columns", v2_flat_columns),
     ("v2_bbox_struct", v2_bbox_struct),
     ("v3_geometry", v3_geometry),
+    ("v2_geo_convention", v2_geo_convention),
 ]
 
 

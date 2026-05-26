@@ -38,6 +38,7 @@ def write_static_catalog(
     format_version_in_metadata: int = 2,
     location_uri: str | None = None,
     meta_dir_name: str = "metadata",
+    extra_properties: dict[str, str] | None = None,
 ) -> Path:
     """Write metadata.json + manifest + manifest-list for a table.
 
@@ -151,6 +152,7 @@ def write_static_catalog(
         "sort-orders": [{"order-id": 0, "fields": []}],
         "properties": {
             "schema.name-mapping.default": json.dumps(name_mapping),
+            **(extra_properties or {}),
         },
         "current-snapshot-id": snapshot_id,
         "refs": {"main": {"snapshot-id": snapshot_id, "type": "branch"}},
