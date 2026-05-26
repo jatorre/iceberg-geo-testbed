@@ -143,6 +143,14 @@ limitations entirely.
 - `_provision.py` — idempotent setup: external volume +
   `CATALOG INTEGRATION ICEBERG_CAT_FRESH` + database `TESTBED`. Reusable.
 - `run.py` — full L0–L4 probe against all four fixtures.
+- `_managed_v3_test.py` — Path-1 experiment: have Snowflake itself
+  write a managed V3 GEOMETRY table; probe it via Snowflake; inspect
+  the resulting metadata.json + manifest avro + parquet structure to
+  see what "real" V3 looks like. The L3-verified V3 result lives here.
+- `_horizon_jwt.py` — end-to-end Horizon Catalog auth bootstrap:
+  generate RSA keypair, upload public key via `ALTER USER`, sign a
+  JWT, exchange for OAuth access token. Outputs a token that DuckDB
+  (or any Iceberg REST client) can use to attach the Horizon catalog.
 
 ## Reproducing
 
