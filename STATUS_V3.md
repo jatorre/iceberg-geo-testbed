@@ -51,6 +51,23 @@ This is what V3 readers should be tested against.
 A reader that rejects either fixture has an *engine-side* gap to file
 against the engine vendor, not against this testbed.
 
+### Cross-engine V3 interop verified
+
+DuckDB reads **Snowflake's own managed V3 table** at exactly the same
+level (L2) it reads our hand-written V3 fixture — same COUNT/SELECT/
+ST_AsText results, same `ST_Intersects` bound-deserializer crash.
+That's strong evidence that:
+
+- Our catalog's V3 metadata + manifest avro + parquet structure is
+  equivalent to Snowflake's for the parts DuckDB exercises.
+- DuckDB's bound-deserializer gap is engine-side (same line of code
+  fails whether the V3 table was written by us or by Snowflake) —
+  filing it against `duckdb-iceberg` is the right move.
+
+The Snowflake-managed V3 table lives at
+`gs://cartobq-iceberg-geo-testbed-eu/managed-v3-geo.MLyhYkeQ/` and is
+publicly readable; we use it as a second cross-engine reference.
+
 Notably, the lineage fixture didn't flip any engine result during our
 testing:
 
@@ -101,7 +118,7 @@ Cell values:
 
 | Engine / version | N1 type recognized | N2 column readback | N3 predicate correct | N4 manifest geometry-bound pruning | W1 write V3 tables |
 |---|---|---|---|---|---|
-| **DuckDB 1.5.3** | ✅ — schema parses, `COUNT(*)` works | ✅ — **NEW since the GeoParquet 2.0 fixture upgrade.** Our V3 parquet now writes the `geom` column with the native `Geometry(crs=)` logical type via `geoarrow-pyarrow`. DuckDB reads it directly as `geometry('ogc:crs84')` — no BLOB→GEOMETRY cast needed; `ST_AsText(geom)` returns WKT cleanly. Cleaning up our parquet *directly fixed* one of DuckDB's two V3 gaps without any DuckDB code change. | ❌ — bound deserializer (`IcebergValue::DeserializeValue`) has no GEOMETRY branch; crashes on first spatial predicate. See [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002). | ❌ — blocked by N3 today; tracking PR. Per PR description: *"This PR doesn't add support for upper bound and lower bounds for the geometry type. That is something we will add later."* | ❓ — not tested |
+| **DuckDB 1.5.3** | ✅ — schema parses, `COUNT(*)` works | ✅ — typed `geometry('ogc:crs84')` materializes; `ST_AsText(geom)` returns WKT cleanly. **Cross-verified at L2 against both our hand-written V3 fixture AND Snowflake's own managed V3 table** — proves cross-engine V3 interop works at this level. The earlier "BLOB→GEOMETRY cast missing" finding was caused by our parquet writing geom as plain BINARY; once we promoted to GeoParquet 2.0 native `Geometry(crs=)` typing, DuckDB reads it directly without the cast. | ❌ — bound deserializer (`IcebergValue::DeserializeValue`) has no GEOMETRY branch; crashes on first spatial predicate. Same failure pattern on Snowflake-written V3 (different bytes, same crash), so this is unambiguously a DuckDB-side gap. See [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002). | ❌ — blocked by N3 today; tracking PR. Per PR description: *"This PR doesn't add support for upper bound and lower bounds for the geometry type. That is something we will add later."* | ❓ — not tested |
 | **BigQuery / BigLake** (2026-05) | ❌ — `Unknown Iceberg type "geometry(OGC:CRS84)"` at `CREATE EXTERNAL TABLE` | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `GEOGRAPHY` type also explicitly unsupported per [icebergmatrix.org](https://icebergmatrix.org/) |
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | ❌ — `Cannot parse type string to primitive: geometry(OGC:CRS84)` on `spark.read.format('iceberg').load(...)` | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `iceberg-spark-runtime` rejects Sedona's Geometry UDT: `java.lang.UnsupportedOperationException: User-defined types are not supported at SparkTypeVisitor.visit`. Even the reference V3 toolchain can't write native geometry today. |
 | **Snowflake (GA May 2026)** | ✅ verified via Snowflake-managed V3 path (`ICEBERG_VERSION=3` required — default for new Iceberg tables is V2; the error message `Unsupported data type 'GEOMETRY' for iceberg tables` doesn't hint at the V3 opt-in needed). Reads its own metadata cleanly. | ✅ — `SELECT geom` materializes as `GEOMETRY(4326)` | ✅ — `WHERE ST_INTERSECTS(geom, envelope)` returns the right rows | ✅ — `bytes_scanned=0` on the spatial predicate; Snowflake's manifest geometry-bound pruning is wired through end-to-end | ✅ — full write path works with `CATALOG='SNOWFLAKE'`. Writes Parquet-native `Geometry` columns (GeoParquet 2.0) + V3 manifest avro with `first_row_id` / geometry bounds populated using `packed_xy_le` (16-byte LE-double-X, LE-double-Y) — empirically matches our testbed's encoding. **Important caveat: V3 *unmanaged* read is not yet working.** We tried three external V3 fixtures (spec-minimal, spec-lineage at spec field IDs, Snowflake-lineage at Snowflake-internal field IDs) — all rejected with `incomplete state`. Since our metadata + manifests + parquets now byte-match Snowflake's own output, this isn't a strictness issue. The V3 unmanaged read path appears generally non-functional today. So Snowflake's V3 geometry support is real but currently bounded to "managed-only". Worth a Snowflake support follow-up. |
