@@ -166,6 +166,7 @@ def write_static_catalog(
     location_uri: str | None = None,
     meta_dir_name: str = "metadata",
     extra_properties: dict[str, str] | None = None,
+    row_lineage: bool = False,
 ) -> Path:
     """Write metadata.json + manifest + manifest-list for a table.
 
@@ -365,13 +366,12 @@ def write_static_catalog(
         metadata["next-row-id"] = sum(d["rows"] for d in data_files)
         metadata["statistics"] = []
         metadata["partition-statistics"] = []
-        # Snowflake's writer doesn't emit `row-lineage`, but its reader
-        # may default absent-as-true (V3 row-lineage = required columns
-        # in data files). Explicit false opts out; without it Snowflake
-        # rejects as "incomplete state" because our parquet files lack
-        # the `_row_id` / `_last_updated_sequence_number` columns that
-        # row-lineage=true would require.
-        metadata["row-lineage"] = False
+        # `row-lineage` is an explicit V3 flag. False (default here)
+        # means data files don't carry the `_row_id` /
+        # `_last_updated_sequence_number` metadata columns. True means
+        # they MUST be present in every data file. The caller is
+        # responsible for ensuring the parquet writer matches.
+        metadata["row-lineage"] = row_lineage
     metadata_json_path = meta_dir / "v1.metadata.json"
     metadata_json_path.write_text(json.dumps(metadata, indent=2))
     return metadata_json_path

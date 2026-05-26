@@ -77,6 +77,17 @@ CASES = [
         expected_rows=196,
         is_v3=True,
     ),
+    Case(
+        name="v3_geometry_lineage",
+        # Companion to v3_geometry with row-lineage on (spec-compliant
+        # _row_id and _last_updated_sequence_number columns in parquet).
+        predicate=(
+            "WHERE ST_INTERSECTS(geom, "
+            "TO_GEOMETRY('POLYGON((-125 32, -115 32, -115 42, -125 42, -125 32))'))"
+        ),
+        expected_rows=196,
+        is_v3=True,
+    ),
 ]
 
 

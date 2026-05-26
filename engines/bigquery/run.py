@@ -78,6 +78,17 @@ CASES = [
         expected_rows=196,
         predicate_n_cols=1,
     ),
+    Case(
+        name="v3_geometry_lineage",
+        predicate=(
+            "WHERE ST_INTERSECTS(ST_GEOGFROMWKB(geom), "
+            "ST_MAKEPOLYGON(ST_GEOGFROMTEXT('"
+            "LINESTRING(-125 32, -115 32, -115 42, -125 42, -125 32)"
+            "')))"
+        ),
+        expected_rows=196,
+        predicate_n_cols=1,
+    ),
 ]
 
 

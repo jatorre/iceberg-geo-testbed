@@ -37,8 +37,8 @@ CASES = [
         "v3_geometry",
         REPO / "data" / "v3_geometry" / "metadata" / "v1.metadata.json",
         "WHERE ST_Intersects(geom, ST_MakeEnvelope(-125, 32, -115, 42))",
-        None,  # currently errors before producing any plan
-        "GEOMETRY bound deserialization not implemented in 1.5.3",
+        None,  # bound deserializer crashes before pruning step runs
+        "L2 readback (geom typed, ST_AsText works); manifest-bound deser missing → no spatial pruning",
     ),
 ]
 
