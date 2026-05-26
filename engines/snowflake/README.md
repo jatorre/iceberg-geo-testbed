@@ -70,33 +70,46 @@ After the IAM fix, all three V2 fixtures register and query correctly:
 | `v2_geo_convention` | **L3** | The GeoIceberg V2 spec reference impl works end-to-end on Snowflake |
 | `v3_geometry` | **L0** | `Iceberg table 'V3_GEOMETRY' is V3 but is in an incomplete state. Please complete the upgrade before creating an iceberg table.` |
 
-## The V3 "incomplete state" finding
+## The V3 "incomplete state" — our writer side, not Snowflake's
 
-Our V3 metadata.json claims `format-version: 3`, includes the V3-required
-fields (`next-row-id`, `last-row-id`, `row-lineage`), and uses the V3
-`geometry(OGC:CRS84)` column type. Polaris (the reference Iceberg REST
-catalog) registers it cleanly; Iceberg-Spark accepts the metadata
-structure too.
+Important nuance: the rejection on our V3 fixture is **us producing
+non-spec-compliant V3**, not a Snowflake capability gap.
 
-Snowflake's V3 reader is stricter. The "incomplete state" error
-appears to be Snowflake detecting that our **manifest avro** is V2
-format (pyiceberg 0.11.1 hardcodes `format_version=2` in
-`write_manifest()` — it doesn't yet write V3-format manifest avros)
-while the metadata.json claims V3. Snowflake interprets this as a
-half-completed V2→V3 upgrade and refuses.
+Our V3 metadata.json claims `format-version: 3` and uses the V3
+`geometry(OGC:CRS84)` column type. But the **manifest avro** is V2
+format — pyiceberg 0.11.1 hardcodes `format_version=2` in
+`write_manifest()`. This mismatch (V3-claiming metadata.json pointed at
+V2 manifest avro) is what Snowflake flags as "incomplete state".
 
-This is consistent with the broader pyiceberg state: per
-[iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818),
-V3 *read* support landed in 0.11 but V3 *write* support (including
-manifest avro format) is incomplete. Until pyiceberg ships V3 manifest
-writing — or we hand-write V3 manifest avros ourselves — Snowflake's
-V3 path stays blocked for us.
+Other tools we tested (Polaris, Iceberg-Spark, DuckDB) are *more
+permissive* and accept the hybrid — which is what let us probe their
+V3 paths and find the type-recognition gap in DuckDB and the type
+rejection in BigQuery. Snowflake's V3 reader is stricter and catches
+the inconsistency before doing any geometry-specific evaluation.
 
-This is a meaningful finding for Snowflake's claimed `full` V3 geometry
-support per icebergmatrix.org: their reader expects strict V3 manifests,
-and writers in the ecosystem don't yet produce them. Verifying their
-spatial-pruning behavior requires getting past this manifest-format
-strictness first.
+**So we have NOT actually tested Snowflake's claimed `full` V3 geometry
+support.** Their reader never got to the geometry-column part of the
+evaluation; our writer never got past the V3 manifest spec.
+
+Ways to actually test Snowflake's V3 geometry:
+
+1. **Snowflake-managed V3.** Create a Snowflake-managed Iceberg V3
+   table with a `GEOMETRY` column (`CREATE ICEBERG TABLE ... USING
+   ICEBERG TBLPROPERTIES('ICEBERG_VERSION'='3')`), insert data, run
+   our spatial probes. Tests Snowflake's V3 implementation directly
+   with Snowflake doing the writing.
+2. **Third-party V3 writer.** Iceberg-Spark can't (UDT mapper gap
+   documented elsewhere); pyiceberg V3 writer is incomplete (tracked
+   at [iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818));
+   Wherobots' Sedona fork might — worth checking.
+3. **Hand-write V3 manifest avro.** Extend `_static_catalog.py` to
+   emit V3-spec manifest avro. Real implementation work; effectively
+   filling in pyiceberg's missing feature ourselves.
+
+Path 1 is the fastest practical test if all we want is to know whether
+Snowflake's V3 geometry works end-to-end. It doesn't test cross-engine
+interop on V3, but cross-engine V3 interop is moot today anyway given
+no other engine reads V3 geometry past type-recognition.
 
 ## Files
 

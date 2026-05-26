@@ -42,7 +42,7 @@ Cell values:
 | **DuckDB 1.5.3** | ✅ — schema parses, `COUNT(*)` works | ❌ — `Unimplemented type for cast (BLOB → GEOMETRY('OGC:CRS84'))` on the parquet reader path | ❌ — bound deserializer (`IcebergValue::DeserializeValue`) has no GEOMETRY branch; crashes on first spatial predicate. See [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002). | ❌ — blocked by N2/N3 today; tracking PR. Per PR description: *"This PR doesn't add support for upper bound and lower bounds for the geometry type. That is something we will add later."* | ❓ — not tested |
 | **BigQuery / BigLake** (2026-05) | ❌ — `Unknown Iceberg type "geometry(OGC:CRS84)"` at `CREATE EXTERNAL TABLE` | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `GEOGRAPHY` type also explicitly unsupported per [icebergmatrix.org](https://icebergmatrix.org/) |
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | ❌ — `Cannot parse type string to primitive: geometry(OGC:CRS84)` on `spark.read.format('iceberg').load(...)` | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `iceberg-spark-runtime` rejects Sedona's Geometry UDT: `java.lang.UnsupportedOperationException: User-defined types are not supported at SparkTypeVisitor.visit`. Even the reference V3 toolchain can't write native geometry today. |
-| **Snowflake (preview)** | ⚠️ — rejects our V3 fixture with `Iceberg table 'V3_GEOMETRY' is V3 but is in an incomplete state. Please complete the upgrade before creating an iceberg table.` Our `format-version: 3` metadata.json is paired with a V2-format manifest avro (pyiceberg 0.11.1 only writes V2 manifests); Snowflake's V3 reader is strict enough to detect the inconsistency. Other tools (Polaris, Iceberg-Spark) accept the hybrid. To verify Snowflake's real V3 support we'd need a V3-spec manifest avro writer, which pyiceberg doesn't yet have ([iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818)). | 📋 | 📋 | 📋 | 📋 — would need a V3-capable writer to test |
+| **Snowflake (preview)** | ❓ — **untested**. Our hand-written V3 fixture is not spec-compliant: `format-version: 3` in metadata.json but V2-format manifest avro (pyiceberg 0.11.1 hardcodes V2 manifest writes). Snowflake's V3 reader correctly catches this inconsistency and rejects with `Iceberg table 'V3_GEOMETRY' is V3 but is in an incomplete state.` Polaris and Iceberg-Spark are more permissive and accept the hybrid, which is what let us probe DuckDB's V3 path. To test Snowflake's claimed `full` V3 support per [icebergmatrix.org](https://icebergmatrix.org/), we'd need either (a) a Snowflake-managed V3 table that Snowflake itself writes (testable; pending), (b) a true V3 manifest avro writer in pyiceberg ([#1818](https://github.com/apache/iceberg-python/issues/1818)), or (c) hand-implement V3 manifest avro in this testbed. | ❓ | ❓ | ❓ | ❓ |
 | **Databricks (DBSQL 2026.10)** | ❌ — `[UNSUPPORTED_DATATYPE] Unsupported data type "GEOMETRY"` at parser level (same for `GEOGRAPHY`). [Databricks's own docs](https://docs.databricks.com/aws/en/iceberg/) acknowledge geospatial as a V3 feature; icebergmatrix.org states *"Geospatial types are explicitly not supported in Databricks Iceberg v3 implementation."* | ❌ | ❌ | ❌ | ❌ |
 | **Oracle ADB 26ai (23.26.2.2.0)** | ❓ — V3 metadata path-based reads are blocked separately by Oracle's parser strictness on pyiceberg-emitted manifests (see V2 status). Can't isolate the V3 question until the V2 read works. | ❓ | ❓ | ❓ | ❓ — not in icebergmatrix.org's coverage |
 | **Apache Polaris** (reference REST catalog) | ✅ — registers V3 tables via `POST .../register` once metadata includes the required `next-row-id` and `row-lineage` fields (caught a real pyiceberg 0.11.1 gap we patched in `testbed/_static_catalog.py`) | n/a — Polaris is a catalog, not a query engine | n/a | n/a | n/a |
@@ -131,10 +131,13 @@ to the changelog.
   is populated.
 - **2026-05-26 (later)** — Snowflake account-side bug resolved
   (missing `storage.buckets.get` IAM permission per Snowflake
-  support). V2 fixtures now all work at L3 on Snowflake. V3 fixture
-  still rejected, but now with a *specific and actionable* error:
-  `incomplete state — Please complete the upgrade`. Root cause is
-  pyiceberg 0.11.1 writing V2-format manifest avros while our
-  metadata.json claims V3; Snowflake's V3 reader catches the
-  inconsistency. Unblocking this needs a V3-spec manifest avro
-  writer (pyiceberg roadmap).
+  support). V2 fixtures now all work at L3 on Snowflake.
+- **2026-05-26 (later still)** — Reclassified Snowflake V3 cells
+  from `📋` (claimed but unverified) to `❓` (untested). The
+  rejection of our V3 fixture is **our spec-noncompliance** (V2
+  manifest avro paired with V3 metadata.json), not a Snowflake
+  capability gap. To actually test Snowflake's V3 geometry support
+  we'd need to drive Snowflake itself as the V3 writer, or get a
+  third-party tool that writes spec-compliant V3 manifest avro.
+  Snowflake's `full` V3 claim per icebergmatrix.org remains
+  unverified by us, but not invalidated.
