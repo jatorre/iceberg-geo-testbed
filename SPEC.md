@@ -268,7 +268,7 @@ this convention **MAY** offer additional optimizations:
 
 ---
 
-## 9 · Reference implementation
+## 9 · Reference implementation and engine support
 
 [`testbed/v2_geo_convention.py`](testbed/v2_geo_convention.py) in this
 repository writes a conformant GeoIceberg V2 table, and
@@ -277,6 +277,12 @@ repository writes a conformant GeoIceberg V2 table, and
 public fixture at
 `gs://cartobq-iceberg-geo-testbed/v2_geo_convention/` is a live
 example you can register in any compatible engine.
+
+**[STATUS.md](./STATUS.md) is the living engine-support table** —
+per-engine cells for each capability defined in this spec (R1 static
+metadata, R2 bbox-col pruning, R3 WKB readback, R4 `geo` property
+visible, O1 auto-derive bbox). Check there before assuming an engine
+delivers a particular optimization.
 
 ---
 

@@ -3,15 +3,19 @@
 **A proposed convention for geospatial data on Apache Iceberg V2 — and the
 cross-engine testbed that proves it works.**
 
-This repository contains three things, in order of what you probably came for:
+This repository contains four things, in order of what you probably came for:
 
 1. **[SPEC.md](./SPEC.md)** — *GeoIceberg V2*, a proposed convention for
    storing geospatial data in Iceberg V2 tables so engines today deliver
    file-level pruning on spatial queries without waiting for Iceberg V3
    geometry types to mature.
-2. **The matrix** — measured Iceberg geospatial support across DuckDB,
-   BigQuery, Sedona / Iceberg-Spark, Snowflake, Databricks, and Oracle ADB.
-3. **The reproducible fixtures** — public GCS bucket
+2. **[STATUS.md](./STATUS.md)** — living per-engine support table for
+   each GeoIceberg V2 capability (which engines have which optimizations,
+   what would need to change to flip each cell).
+3. **The matrix** (in this file, below) — measured Iceberg geospatial
+   support across DuckDB, BigQuery, Sedona / Iceberg-Spark, Snowflake,
+   Databricks, and Oracle ADB on an L0–L4 ladder.
+4. **The reproducible fixtures** — public GCS bucket
    `gs://cartobq-iceberg-geo-testbed/` and Python builders that anyone can
    re-run.
 
@@ -160,6 +164,7 @@ Other takeaways from the matrix runs themselves:
 
 ```
 SPEC.md                      # GeoIceberg V2 — the recommended convention
+STATUS.md                    # Living per-engine support table
 BLOG_POST.md                 # Narrative writeup
 README.md                    # This file
 
