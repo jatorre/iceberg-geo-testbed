@@ -264,6 +264,14 @@ def write_static_catalog(
                 lower_bounds=df["lower"],
                 upper_bounds=df["upper"],
             )
+            # Optional Iceberg metrics (column_sizes / value_counts /
+            # null_value_counts). Spec-optional, but some readers — notably
+            # Oracle ADB's Iceberg parser — treat them as required to
+            # enumerate the column list. Populate when the fixture supplies
+            # them.
+            for _k in ("column_sizes", "value_counts", "null_value_counts"):
+                if df.get(_k) is not None:
+                    data_file_args[_k] = df[_k]
             if manifest_format >= 3:
                 # V3 adds `first_row_id` to each data file — the row_id of
                 # the first row in this file. For a fresh table where no

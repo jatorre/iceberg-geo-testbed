@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 from pyiceberg.schema import Schema
 from pyiceberg.types import DoubleType, NestedField, StringType
 
-from .common import REGIONS, double_le, stable_seed
+from .common import REGIONS, double_le, parquet_metrics, stable_seed
 from ._static_catalog import write_static_catalog
 
 ROOT = Path(__file__).parent.parent / "data" / "v2_flat_columns"
@@ -77,6 +77,7 @@ def build(*, location_uri: str | None = None, meta_dir_name: str = "metadata") -
     data_files = []
     for region in REGIONS:
         p = _write_parquet(region)
+        col_sizes, val_counts, null_counts = parquet_metrics(p, [1, 2, 3, 4, 5])
         data_files.append(
             {
                 "path": f"data/{region.name}.parquet",
@@ -96,6 +97,11 @@ def build(*, location_uri: str | None = None, meta_dir_name: str = "metadata") -
                     4: double_le(region.xmax + 0.001),
                     5: double_le(region.ymax + 0.001),
                 },
+                # Optional metrics — Oracle's reader needs these to build its
+                # column list (other engines ignore them).
+                "column_sizes": col_sizes,
+                "value_counts": val_counts,
+                "null_value_counts": null_counts,
             }
         )
 

@@ -70,3 +70,32 @@ def stable_seed(name: str) -> int:
     it would make fixture builds non-reproducible across processes."""
     h = hashlib.sha256(name.encode("utf-8")).digest()
     return int.from_bytes(h[:4], "little")
+
+
+def parquet_metrics(path, field_ids: list[int]) -> tuple[dict, dict, dict]:
+    """Compute the optional Iceberg per-file metrics from a parquet file's
+    metadata: (column_sizes, value_counts, null_value_counts), each keyed by
+    Iceberg field id.
+
+    `field_ids` lists the field ids in parquet column order (1:1 for our flat,
+    all-primitive fixtures). These metrics are spec-optional, but some readers
+    (Oracle ADB) treat them as required to enumerate columns.
+    """
+    import pyarrow.parquet as pq
+
+    md = pq.read_metadata(str(path))
+    column_sizes = {fid: 0 for fid in field_ids}
+    null_value_counts = {fid: 0 for fid in field_ids}
+    value_counts = {fid: md.num_rows for fid in field_ids}
+    for rg in range(md.num_row_groups):
+        row_group = md.row_group(rg)
+        for col in range(row_group.num_columns):
+            fid = field_ids[col]
+            cc = row_group.column(col)
+            column_sizes[fid] += cc.total_compressed_size
+            stats = cc.statistics
+            if stats is not None:
+                nc = getattr(stats, "null_count", None)
+                if nc is not None:
+                    null_value_counts[fid] += nc
+    return column_sizes, value_counts, null_value_counts

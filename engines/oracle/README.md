@@ -13,16 +13,62 @@ column list`, despite the same files being readable by DuckDB, BigQuery,
 and Sedona/Iceberg-Spark (and **registered cleanly in Apache Polaris**
 — the reference open-source REST catalog).
 
-So the metadata is spec-compliant. Oracle's parser is stricter than the
-spec mandates. Per Oracle's docs, the supported producers are
-Spark/Athena/Snowflake — pyiceberg isn't on that list. The likely missing
-fields are the optional-by-spec metrics (`column_sizes`, `value_counts`,
-`null_value_counts`) that Spark-Iceberg's writer populates and Oracle
-treats as required.
+### Update 2026-05-26 — it's Oracle's Iceberg reader, not storage/auth/producer/metrics
+
+Three hypotheses tested and **all disproven**. The error
+`ORA-20000: Failed to generate column list` is constant across every
+variable we changed:
+
+1. **Missing manifest metrics?** No. We extended `_static_catalog.py` to
+   populate `column_sizes`/`value_counts`/`null_value_counts` (see
+   `testbed/common.py:parquet_metrics`), staged a metrics-complete V2
+   fixture, retried → same error.
+2. **pyiceberg producer?** No. We pointed Oracle at **Snowflake's own
+   Snowflake-managed V2 metadata** (Spark-lineage output — a producer
+   Oracle officially supports) → identical error.
+3. **GCS storage backend?** No — this is the decisive control. We staged
+   the same fixture to **S3** (`s3://carto-iceberg-geo-testbed-s3/...`,
+   `s3://`-scheme paths as Spark/Athena emit) and gave Oracle a
+   long-lived IAM credential. **Oracle authenticated fine — `LIST_OBJECTS`
+   listed the metadata objects — but `CREATE_EXTERNAL_TABLE` still failed
+   with the identical error.** Auth was confirmed working and removed as a
+   variable; the result is the same on S3 (credentialed) as on GCS
+   (public).
+
+So the wall is **Oracle ADB's Iceberg metadata reader / column-list
+generation itself** — independent of storage backend (GCS, S3), auth mode
+(public, IAM), producer (pyiceberg, Snowflake/Spark), and manifest
+metrics. Direct-`metadata.json` Iceberg registration via
+`DBMS_CLOUD.CREATE_EXTERNAL_TABLE` with
+`{"access_protocol":{"protocol_type":"iceberg"}}` does not work for these
+tables on this Oracle version (AI Database 26ai `23.26.2.2.0`). The next
+thing to probe (unverified) is whether Oracle needs a different `format`
+shape (e.g. catalog-based registration / `protocol_config`) rather than a
+bare metadata-file pointer. Run `python engines/oracle/run.py` to
+reproduce (GCS); the S3 leg needs a long-lived IAM key.
+
+Auth-mode data point: Oracle's `DBMS_CLOUD.CREATE_CREDENTIAL` for AWS has
+**no session-token field** — temporary STS/SSO creds fail with
+`ORA-20403`; only long-lived IAM keys work.
+
+The metrics we added are a genuine spec-completeness improvement and are
+kept — they just don't move Oracle.
 
 Oracle is **not in icebergmatrix.org's coverage** as of 2026-05-24, so
 this testbed appears to be the first cross-engine documentation of
-Oracle ADB's Iceberg-reader strictness.
+Oracle ADB's Iceberg-reader behavior.
+
+---
+
+### Original hypothesis (2026-05-23, now superseded)
+
+So the metadata is spec-compliant. Oracle's parser is stricter than the
+spec mandates. Per Oracle's docs, the supported producers are
+Spark/Athena/Snowflake — pyiceberg isn't on that list. The originally
+suspected missing fields were the optional-by-spec metrics
+(`column_sizes`, `value_counts`, `null_value_counts`) — but see the
+2026-05-26 update above: populating them did **not** help, and Snowflake's
+own metadata fails identically.
 
 The rejection is consistent across:
 - All three fixtures (v2_flat_columns, v2_bbox_struct, v3_geometry).

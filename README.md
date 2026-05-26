@@ -65,7 +65,7 @@ five-level support ladder (defined below).
 | **Snowflake 10.19.100 (GCP-EU)** | **L3** — pruning via manifest `record_count` (`bytes_scanned=0`) | **L3** — same; Snowflake variant access `bbox:xmin::FLOAT` | **L3** *via Snowflake-managed write path* — `CREATE ICEBERG TABLE … GEOMETRY ICEBERG_VERSION=3` works; spatial predicate returns correct 1000 rows; `bytes_scanned=0` confirms manifest geometry-bound pruning. **L0** for our V3 reference catalog (unmanaged path): Snowflake's V3 reader requires the row-lineage metadata columns (`METADATA$RL_ROW_ID`, `METADATA$RL_LAST_UPDATED_SEQUENCE_NUMBER`) physically present in parquet data files, even when our metadata.json sets `row-lineage: false` (which the V3 spec permits). We treat this as a Snowflake-side strictness gap to file rather than bend our reference catalog to match. See [engines/snowflake/README.md](engines/snowflake/README.md). |
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | **L3** — 1 of 10 files | **L3** — prunes through struct fields | **L0** — `Cannot parse type string to primitive: geometry(OGC:CRS84)`. Sedona itself also can't *write* V3 geometry: `iceberg-spark-runtime` rejects Sedona's Geometry UDT (`UnsupportedOperationException: User-defined types are not supported`). Our V2 numeric bound encoding is bit-identical to Iceberg-Spark's. See [engines/sedona/README.md](engines/sedona/README.md). |
 | **Databricks (DBSQL 2026.10)** | **L2** *via Snowflake federation* | **L2** *via Snowflake federation* | **L0** — but precisely: `GEOMETRY(SRID)`/`GEOGRAPHY(SRID)` **work in Delta**, while the Iceberg-compat writer rejects them (`DELTA_ICEBERG_WRITER_COMPAT_VIOLATION`, `IcebergWriterCompatV1`/`V3`) — geo types don't cross the Delta→Iceberg/UniForm boundary. Databricks "Iceberg" is Delta + an Iceberg-compat writer, not a native engine. Geo support in the Iceberg path is **likely coming soon** (not available as of 2026-05-26). **V2 update (2026-05-26):** Databricks reaches our V2 GeoIceberg data via `CREATE CONNECTION TYPE snowflake` + foreign catalog against a Snowflake-managed V2 table — schema correct (`geom_wkb` as `binary`), counts match Snowflake (10000/196/1000), and `st_geomfromwkb(geom_wkb)` parses the WKB into typed POINTs that `st_intersects` queries correctly. That's **query federation** (JDBC pushdown). The Iceberg-native **direct-from-GCS read does NOT engage** for Snowflake-on-GCP: Databricks's direct path only accepts the `gs://` scheme, but Snowflake-on-GCP vends its metadata location as `gcs://`, so it silently falls back to JDBC (every `EXPLAIN` → `SnowflakePlan`). Still *no* generic Iceberg REST client and *no* static-`metadata.json` path. See [engines/databricks/README.md](engines/databricks/README.md). |
-| **Oracle ADB 26ai (23.26.2.2.0)** | **L0** | **L0** | **L0** — all three fail with `ORA-20000: Iceberg parameter error / Failed to generate column list`. Network + public-bucket access verified (`LIST_OBJECTS` works). Path-based Iceberg registration is the documented syntax — Oracle's reader just doesn't accept pyiceberg-emitted manifests. Spark/Athena/Snowflake-produced metadata is what Oracle tests against. See [engines/oracle/README.md](engines/oracle/README.md). |
+| **Oracle ADB 26ai (23.26.2.2.0)** | **L0** | **L0** | **L0** — all fail with `ORA-20000: Failed to generate column list`. **Updated 2026-05-26:** ruled out *every* external variable — adding optional metrics (`column_sizes`/`value_counts`/`null_value_counts`) didn't help; **Snowflake's own Spark-lineage metadata fails identically**; and staging to **S3 with a working IAM credential** (Oracle `LIST_OBJECTS` succeeds) **still fails the same way**. So it's **not** storage (GCS vs S3), auth, producer, or metrics — the blocker is Oracle's Iceberg metadata reader / column-list generation itself for direct-`metadata.json` registration. See [engines/oracle/README.md](engines/oracle/README.md). |
 | **PyIceberg 0.11.1**   | reads | reads | ⚠️ V3 read landed; no `GeometryType` writer | Tracking [iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818). |
 | **DuckLake 1.0**       | — | — | "forthcoming" | Re-test each release. |
 
@@ -96,10 +96,52 @@ from L0–L4: **how does the engine discover the table?** Two families:
   metadata pointer. Databricks's Lakehouse Federation and Snowflake's
   Horizon are this kind of consumer.
 
-Engines that *only* support catalog-mediated access show up as `n/a in
-this testbed` in the matrix. Filling in those cells properly would
-require Glue or Horizon as a bridge — real work that's tangential to
-the V3 geometry question this testbed is asking.
+Engines that *only* support catalog-mediated access need a named catalog
+as a bridge. We did exactly this for Databricks: federated a
+Snowflake-managed table into Unity Catalog via `CREATE CONNECTION TYPE
+snowflake` and read our V2 GeoIceberg data through it (query federation).
+
+### What actually governs interop: storage × catalog × auth
+
+The L0–L4 ladder grades *engine × format*, but the harder-won lesson from
+this testbed is that whether a read works **at all** is a product of three
+orthogonal axes — and engines support uneven slices of the cube:
+
+**1. Storage backend.** S3 is the lingua franca; GCS is second-class in
+several engines. Databricks's direct-read path accepts
+`s3/gs/abfss/r2/wasbs` but rejects Snowflake-on-GCP's `gcs://` metadata
+scheme — so the *same table* on `s3://` would qualify for a direct read
+and on `gcs://` silently falls back to JDBC. (Oracle is the exception that
+proves it's not always storage: it fails on **both** GCS and S3 — there
+the blocker is the engine's Iceberg reader itself.)
+
+**2. Catalog mechanism** (how the table is announced):
+- Static `metadata.json` on a bucket: DuckDB ✅, BigQuery ✅, Databricks ✗, Oracle ✗.
+- Generic Iceberg REST: DuckDB ✅ (JWT→Horizon); Databricks ✗ — *no
+  generic connector*, only `GLUE`/`HIVE_METASTORE`/`SNOWFLAKE`/`DATABRICKS`.
+- Named catalog (Glue/HMS/Snowflake/Unity): the only thing Databricks federates.
+
+**3. Auth mode** — "open vs behind auth" is its own axis:
+- Public/anonymous; credential-vended (Snowflake needs an external volume
+  *and* `storage.buckets.get`, public-ness doesn't exempt you); keyed vs
+  keyless (Databricks Free Edition had Workload Identity disabled → SA-key
+  only); OAuth/JWT (DuckDB→Horizon); and **long-lived vs temporary**
+  (Oracle's AWS credential rejects STS session tokens with `ORA-20403` —
+  needs long-lived IAM keys).
+
+So "Snowflake-on-GCS" and "Snowflake-on-AWS" are genuinely different
+cells: same engine, same format, different storage scheme → different
+downstream behavior.
+
+**The empty-credentials trap.** Many storage connectors have *no
+first-class anonymous path* — the credential object is mandatory in the
+API even for public data. To read a public bucket you often hand the
+engine an **empty/placeholder credential** (DuckDB's `s3_access_key_id=''`,
+Spark anonymous providers, an external volume with no secret) to route
+into the anonymous code path. The data is open; the *engine* insists a
+credential object exist. It's an API-shape artifact, not a security
+requirement — and it trips people who reasonably assume "it's public, why
+do I need a credential?"
 
 ---
 

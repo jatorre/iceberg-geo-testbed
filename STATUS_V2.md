@@ -17,17 +17,31 @@ spec calls out.
 
 ## Capability legend
 
-The columns are the discrete behaviors a GeoIceberg V2 reader needs to
-implement. The first four are required to claim conformance; the
-fifth is an optional engine optimization the spec recommends.
+The columns are the discrete behaviors a GeoIceberg V2 reader could
+implement, in two tiers:
 
-| # | Capability | Required? | What it means |
+- **R1–R3 — the load-bearing tripod (conformance).** These are what make
+  the convention portable *precisely because they ask nothing geo-aware
+  of the engine*: bbox columns are plain doubles (standard min/max
+  pruning), `geom_wkb` is plain binary (standard `ST_GeomFromWKB`). This
+  is why R1–R3 work almost everywhere today.
+- **R4 + O1 — the optional "self-describing" layer (aspirational).** These
+  require the engine to understand the *convention itself* — to read the
+  bespoke `geo` table property and wire it into query planning. **This is
+  exactly what Iceberg V3 supersedes**, so no engine is expected to
+  implement them for a deliberately-transitional V2 convention. We track
+  them to document the full design, not as gaps. Note **O1 depends on
+  R4**: to synthesize a bbox predicate from `ST_Intersects(geom, env)` the
+  planner must first read the `geo` property to learn which columns bound
+  the geometry — so they're really one capability.
+
+| # | Capability | Tier | What it means |
 |---|---|---|---|
-| **R1** | Static metadata read | yes\* | Reader can register a table by pointing at `metadata.json` on cloud storage. \*Not all engines support this path; engines that only support catalog-mediated access are marked **catalog-only**. |
-| **R2** | bbox-col file pruning | **yes** | Engine applies the standard overlap predicate (`xmin ≤ q.xmax AND xmax ≥ q.xmin AND ymin ≤ q.ymax AND ymax ≥ q.ymin`) to the manifest `lower_bound`/`upper_bound` on the bbox columns. The core promise of the convention. |
-| **R3** | WKB column readback | **yes** | Engine can decode the `geom_wkb` BINARY column via `ST_GeomFromWKB()` (or equivalent) into a usable geometry. |
-| **R4** | `geo` property visible | should | The `geo` table property is surfaced via standard metadata queries (`SHOW TBLPROPERTIES`, `INFORMATION_SCHEMA`, etc.) so tooling can detect GeoIceberg V2 tables. |
-| **O1** | Auto-derive bbox from `ST_Intersects` | optional | Engine synthesizes the bbox-col predicate when only `ST_Intersects(geom_wkb, envelope)` is present. The current GeoParquet 1.1 ecosystem doesn't do this either — when an engine implements it, both formats benefit transparently. |
+| **R1** | Static metadata read | conformance\* | Reader can register a table by pointing at `metadata.json` on cloud storage. \*Not all engines support this path; engines that only support catalog-mediated access are marked **catalog-only**. |
+| **R2** | bbox-col file pruning | conformance | Engine applies the standard overlap predicate (`xmin ≤ q.xmax AND xmax ≥ q.xmin AND ymin ≤ q.ymax AND ymax ≥ q.ymin`) to the manifest `lower_bound`/`upper_bound` on the bbox columns. The core promise of the convention. |
+| **R3** | WKB column readback | conformance | Engine can decode the `geom_wkb` BINARY column via `ST_GeomFromWKB()` (or equivalent) into a usable geometry. |
+| **R4** | `geo` property visible | aspirational (self-describing; V3 supersedes) | The `geo` table property is surfaced via standard metadata queries (`SHOW TBLPROPERTIES`, `INFORMATION_SCHEMA`, etc.) so tooling can detect GeoIceberg V2 tables. Informational, not load-bearing. |
+| **O1** | Auto-derive bbox from `ST_Intersects` | aspirational (depends on R4; V3 supersedes) | Engine synthesizes the bbox-col predicate when only `ST_Intersects(geom_wkb, envelope)` is present. Requires reading the `geo` property (R4) to map geometry→bbox columns. The GeoParquet 1.1 ecosystem doesn't do this either; engines won't add convention-aware auto-pruning when V3 native geometry does it as a first-class type. |
 
 Cell values:
 
@@ -46,7 +60,7 @@ Cell values:
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | ✅ — via Spark's `read.format('iceberg').load(metadata_path)` | ✅ — distinct `input_file_name()` = 1 | ✅ — `ST_GeomFromWKB(geom_wkb)` returns Sedona Geometry | ❓ | ❌ |
 | **Snowflake 10.19.100 (GCP_EUROPE_WEST2)** | catalog-only — requires `EXTERNAL VOLUME` + `CATALOG INTEGRATION` with `CATALOG_SOURCE = OBJECT_STORE`. *Key gotcha:* the GCS service account needs `storage.buckets.get` (via `roles/storage.legacyBucketReader`) in addition to `objectAdmin`, otherwise `CREATE ICEBERG TABLE` fails with the misleading `091369: Query needs to be retried to setup external volume`. `SYSTEM$VERIFY_EXTERNAL_VOLUME` doesn't catch this, and `ICEBERG_ACCESS_ERRORS` doesn't log it. Snowflake support confirmed; documented in [engines/snowflake/README.md](engines/snowflake/README.md). | ✅ — verified L3 on all three V2 fixtures (`v2_flat_columns`, `v2_bbox_struct`, `v2_geo_convention`); `bytes_scanned=0` because Snowflake answers `COUNT(*)` with bbox predicate from the manifest's `record_count` directly (no parquet read needed) | ✅ — `geom_wkb` exposes as BINARY; `TO_GEOMETRY(geom_wkb)` materializes points | ❓ — needs explicit `SHOW TBLPROPERTIES` test | ❓ |
 | **Databricks (DBSQL 2026.10)** | catalog-only — no generic Iceberg REST or static-metadata path. ✅ **reachable via `CREATE CONNECTION TYPE snowflake`** against a Snowflake-managed V2 table (2026-05-26); query federation only — the direct-from-GCS read falls back to JDBC because Databricks rejects Snowflake-on-GCP's `gcs://` metadata scheme (accepts only `gs://`) | ✅ — federated bbox predicate returns 196, matches Snowflake | ✅ — `st_geomfromwkb(geom_wkb)` parses WKB to typed POINTs; `st_intersects` correct (=1000) | ❓ | ❓ |
-| **Oracle ADB 26ai** | ⚠️ — `DBMS_CLOUD.CREATE_EXTERNAL_TABLE` syntax exists and works for some manifests, but rejects pyiceberg-emitted manifests with `ORA-20000: Iceberg parameter error`. Reader is stricter than the spec; likely fixable by also populating optional manifest stats (`column_sizes`, `value_counts`, `null_value_counts`). | ❓ — blocked by R1 today | ❓ | ❓ | ❓ |
+| **Oracle ADB 26ai** | ❌ — `DBMS_CLOUD.CREATE_EXTERNAL_TABLE` fails with `ORA-20000: Failed to generate column list`. **Updated 2026-05-26:** ruled out metrics (added them, no change), producer (**Snowflake's own Spark-lineage metadata fails identically**), and **storage** (staged to S3 with a working IAM credential — `LIST_OBJECTS` succeeds — but the Iceberg read still fails identically). So it's Oracle's Iceberg metadata reader itself, not storage/auth/producer/metrics. | ❌ — blocked by R1 | ❓ | ❓ | ❓ |
 | **Apache Polaris** (reference REST catalog) | ✅ — registers via `POST /api/catalog/v1/{cat}/namespaces/{ns}/register` with a `metadata-location` pointing at our GCS metadata.json | n/a — Polaris is a catalog, not a query engine | n/a | n/a — Polaris exposes the property to client engines | n/a |
 | **PyIceberg 0.11.1** | ✅ — `pyiceberg.io.pyarrow.PyArrowFileIO` reads V2 metadata | ❓ — needs explicit row-filter test | ✅ — returns the WKB column as Arrow `binary` | ❓ | n/a (library, not a query planner) |
 
