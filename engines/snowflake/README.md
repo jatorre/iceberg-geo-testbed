@@ -147,6 +147,11 @@ limitations entirely.
   write a managed V3 GEOMETRY table; probe it via Snowflake; inspect
   the resulting metadata.json + manifest avro + parquet structure to
   see what "real" V3 looks like. The L3-verified V3 result lives here.
+- `_managed_v2_test.py` — same idea for a managed **V2 GeoIceberg**
+  table (`ICEBERG_VERSION=2`, bbox doubles + `geom_wkb BINARY`, no
+  GEOMETRY type). L3 on Snowflake (10000/196, WKB round-trips). This is
+  the table we federate into Databricks Free Edition — see
+  `engines/databricks/_federation_v2.py` and the Databricks README.
 - `_horizon_jwt.py` — end-to-end Horizon Catalog auth bootstrap:
   generate RSA keypair, upload public key via `ALTER USER`, sign a
   JWT, exchange for OAuth access token. Outputs a token that DuckDB

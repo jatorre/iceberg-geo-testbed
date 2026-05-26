@@ -1,10 +1,64 @@
 # Databricks engine runner
 
-Status as of **2026-05-23.** Databricks SQL (DBSQL `2026.10`) on a
-GCP-hosted workspace, authenticating via REST token + warehouse ID from
-the `carto-dev-database-credentials` gcloud secret.
+Status as of **2026-05-23** (original) and **2026-05-26** (Snowflake
+federation update below). Databricks SQL (DBSQL `2026.10`).
 
-## Headline finding
+## Update 2026-05-26 — Databricks ↔ Snowflake federation (V2 GeoIceberg)
+
+We retested the "can Databricks reach our catalogs" question against a
+Snowflake-managed **V2 GeoIceberg** table (bbox doubles + `geom_wkb
+BINARY`, no `GEOMETRY` type token — see
+`engines/snowflake/_managed_v2_test.py`). Two corrections + one new
+finding:
+
+**1. `CREATE CONNECTION TYPE snowflake` works — our earlier claim was
+too strong.** The original test below only tried `TYPE iceberg` and
+`TYPE ICEBERG_REST` (both `CONNECTION_TYPE_NOT_SUPPORTED`). It never
+tried `TYPE snowflake`, which *is* a valid connector. On the shared
+CARTO metastore it returns `PERMISSION_DENIED` (no `CREATE CONNECTION`
+grant), not a type error — proving the type is recognized. On a personal
+**Databricks Free Edition** sandbox (where you're metastore admin), it
+creates cleanly.
+
+**2. Query federation: ✅ V2 + WKB is portable into Databricks today.**
+Via `CREATE CONNECTION TYPE snowflake` + `CREATE FOREIGN CATALOG`,
+Databricks reads the Snowflake-managed V2 table: schema correct
+(`geom_wkb` surfaces as `binary`), `COUNT(*)=10000`, bbox predicate
+`=196`, polygon point-in-poly `=1000` — all matching Snowflake exactly.
+`st_geomfromwkb(geom_wkb)` parses the WKB into proper POINTs and
+`st_intersects(...)` runs correctly. The WKB parsing happens in
+Databricks compute (it's a Databricks function over bytes pulled from
+Snowflake). This is the V2 convention working as a portable bridge.
+
+**3. Catalog federation (direct-from-GCS Iceberg read): ⚠️ falls back
+to JDBC on Snowflake-on-GCP.** We set up the full path on Free Edition —
+a dedicated read-only GCP SA, a Databricks **storage credential**
+(via the UC REST API; SA-key path, since the keyless Workload Identity
+Federation path is disabled on Free Edition), and a read-only
+**external location** over the bucket (`validate-storage-credentials`
+returns READ/LIST = PASS). Despite that, every `EXPLAIN` shows
+`SnowflakePlan` / `SnowflakeRelation.scala` — reads go via **JDBC
+pushdown**, never directly from GCS.
+
+Root cause (corroborated): Databricks's direct-read qualification only
+accepts URI schemes `s3/s3a/s3n/abfs/abfss/gs/r2/wasb/wasbs`, but
+**Snowflake-on-GCP vends its Iceberg metadata location with the
+`gcs://` scheme** (`SYSTEM$GET_ICEBERG_TABLE_INFORMATION` →
+`gcs://cartobq-…`). Databricks can't match a `gcs://` metadata location
+to any governed external location — it explicitly rejects `gcs://`
+(`url has invalid URI scheme gcs. Valid URI schemes include … gs …`) —
+so it silently falls back to JDBC. This is **GCP-specific**: on AWS
+(`s3://`) or Azure (`abfss://`) the schemes would line up and direct
+reads would likely qualify.
+
+Net: Databricks *can* consume a Snowflake-managed Iceberg catalog (query
+federation), but the Iceberg-native direct read doesn't engage for
+Snowflake-on-GCP because of the `gcs://`-vs-`gs://` scheme mismatch.
+
+Repro: `engines/databricks/_federation_v2.py` (sandbox creds at
+`~/.config/iceberg-geo-testbed/databricks-sandbox.txt`).
+
+## Headline finding (original 2026-05-23, partially superseded by above)
 
 Databricks fully supports Iceberg V2 reads — **but only through specific
 named catalog providers**. There is no generic Iceberg REST catalog
@@ -20,10 +74,13 @@ both confirmed by independent sources:
   integration`. The `databricks:rest-catalog:v2: full` cell is about
   *Unity Catalog SERVING* the REST API, not consuming external ones.
 
-Our hands-on confirmed it: `CREATE CONNECTION TYPE iceberg` and
-`CREATE CONNECTION TYPE ICEBERG_REST` both error with
-`CONNECTION_TYPE_NOT_SUPPORTED`. The full list of supported connection
-types is iceberg-free except for AWS `GLUE`.
+Our hands-on confirmed the *generic* Iceberg paths don't exist:
+`CREATE CONNECTION TYPE iceberg` and `CREATE CONNECTION TYPE
+ICEBERG_REST` both error with `CONNECTION_TYPE_NOT_SUPPORTED`. **But
+`TYPE snowflake` does work** (see the 2026-05-26 update above) — so the
+"named catalog providers only" framing is right, but Snowflake *is* one
+of those providers and is reachable. There's still no generic Iceberg
+REST client and no static-`metadata.json` path.
 
 > *"Iceberg tables in Unity Catalog do not support a LOCATION clause."*
 > — [Databricks docs on Iceberg](https://docs.databricks.com/aws/en/iceberg/)
@@ -39,33 +96,33 @@ V3 geometry question this testbed is asking.
 To still get a meaningful Databricks row in the matrix, we tried having
 Databricks **write its own** V3 Iceberg table with a `GEOMETRY` column.
 
-```sql
-CREATE TABLE iceberg_geo_testbed_v3 (
-  id STRING,
-  geom GEOMETRY
-) USING ICEBERG
-TBLPROPERTIES ('format-version'='3');
+### Geo types: supported in Delta, NOT in Iceberg (verified 2026-05-26)
 
--- [UNSUPPORTED_DATATYPE] Unsupported data type "GEOMETRY".
--- SQLSTATE: 0A000
-```
+The earlier "Databricks doesn't recognize the geo type tokens" claim was
+too coarse. Re-tested precisely on DBSQL `2026.10`:
 
-Same result for `GEOGRAPHY`. So Databricks SQL's parser doesn't recognize
-the V3 geospatial type tokens as of DBSQL `2026.10`. This matches the
-state in BigQuery and Sedona/Iceberg-Spark.
+| What | Result |
+|---|---|
+| `typeof(st_point(0,0))` | `geometry(0)` — the GEOMETRY type **exists** (functions return typed `geometry(SRID)`, not strings) |
+| bare `GEOMETRY` / `GEOGRAPHY` in DDL or `CAST` | ❌ `UNSUPPORTED_DATATYPE` — the type name **requires** the `(SRID)` parameter |
+| `GEOMETRY(4326)` / `GEOGRAPHY(4326)` column in **Delta** | ✅ **works** |
+| `GEOMETRY(4326)` column in **Iceberg** | ❌ `DELTA_ICEBERG_WRITER_COMPAT_VIOLATION.UNSUPPORTED_DATA_TYPE` (`IcebergWriterCompatV1`) |
+| same with `format-version=3` | ❌ `IcebergWriterCompatV3 does not support the data type geometry(4326)` |
 
-What *does* work:
+So the accurate statement: **Databricks supports `GEOMETRY(SRID)` /
+`GEOGRAPHY(SRID)` typed columns — but only in Delta. The Iceberg writer
+(`IcebergWriterCompatV1`/`V3`) explicitly rejects them**, so geo types
+don't pass through the Delta→Iceberg (UniForm) compatibility layer.
 
-- `CREATE TABLE … USING ICEBERG TBLPROPERTIES ('format-version'='3')`
-  with non-geometry columns (so the V3 framework is enabled — VARIANT,
-  deletion vectors, row IDs from the V3 preview).
-- The `ST_*` family of spatial **functions** (`st_point`, `st_area`,
-  `st_intersects`, `st_geomfromtext`, …). But they return WKT/WKB
-  **strings**, not a typed Geometry value — there's no UDT registered.
+The `DELTA_ICEBERG_WRITER_COMPAT_VIOLATION` error name is itself a tell:
+**Databricks "Iceberg" tables are Delta tables with an Iceberg-compat
+writer on top**, not a native Iceberg engine — which is exactly why the
+geo type stops at the Iceberg boundary.
 
-So Databricks has the spatial *function library* but not the V3 typed
-geo-column primitives that the Iceberg V3 spec relies on for per-file
-bounds + pruning.
+**Roadmap:** geo support in the Iceberg path is *not* there yet as of
+2026-05-26 but is **likely coming soon** — worth re-testing periodically.
+Generic Iceberg-REST-catalog federation (below) has no public answer as
+of 2026-05-26.
 
 ## Matrix row
 
@@ -73,7 +130,7 @@ bounds + pruning.
 |---|---|---|
 | `v2_flat_columns` | n/a | Can't read our metadata; structural blocker. Could be created from scratch in a Databricks-managed table, but that's no longer an interop test. |
 | `v2_bbox_struct`  | n/a | same |
-| `v3_geometry`     | **L0** | Even self-managed: `GEOMETRY` (and `GEOGRAPHY`) types rejected by DBSQL parser. |
+| `v3_geometry`     | **L0** | `GEOMETRY(SRID)`/`GEOGRAPHY(SRID)` work in **Delta** but the Iceberg-compat writer rejects them (`DELTA_ICEBERG_WRITER_COMPAT_VIOLATION`, V1 and V3). Geo-in-Iceberg likely coming soon (not available 2026-05-26). |
 
 ## What would unblock it
 
