@@ -12,6 +12,35 @@ spatial pruning on engines that don't yet support V3 native geometry.
 That convention is the recommended migration path while this table
 remains mostly red.
 
+## The reference catalog
+
+`testbed/v3_geometry.py` writes a **spec-minimal V3 reference catalog**
+that any spec-compliant V3 reader should be able to register:
+
+- `format-version: 3` with `row-lineage: false` (spec-permitted off)
+- Schema: `id: string`, `geom: geometry`. No CRS in the type token —
+  CRS info lives in the parquet column's logical type.
+- `next-row-id`, `last-column-id`, `statistics: []`,
+  `partition-statistics: []` populated as the V3 spec expects.
+- Manifest avro is real V3 (subclassed pyiceberg's V2 writers since
+  the upstream library's V3 writer is incomplete; see
+  `testbed/_static_catalog.py`). Includes `first_row_id` on data
+  files, `first_row_id` on the manifest-list entry, and the
+  `iceberg.schema` metadata key Snowflake-managed V3 emits.
+- **Parquet data files use the native `Geometry(crs=)` logical type**
+  via `geoarrow-pyarrow` (GeoParquet 2.0 style), with WKB-encoded
+  point payloads. Same column-level encoding Snowflake's own managed
+  V3 writer produces.
+- Per-file geometry bounds in the `packed_xy_le` encoding (16 bytes:
+  little-endian X, little-endian Y) — confirmed against Snowflake's
+  own bound bytes byte-for-byte.
+
+Published at `gs://cartobq-iceberg-geo-testbed/v3_geometry/` (public).
+This is what V3 readers should be tested against.
+
+A reader that rejects this fixture has an *engine-side* gap to file
+against the engine vendor, not against this testbed.
+
 ## Capability legend
 
 V3 native geometry support breaks down into four read-side
@@ -156,6 +185,18 @@ to the changelog.
   `DEFAULT_READ_VERSION` (=2) for the record schema. Verified the V3
   fields are now populated in the avro bytes (`first_row_id` values
   0, 1000, ... per data file).
+- **2026-05-26 (final)** — Promoted `testbed/v3_geometry.py` to write
+  parquet files with native `Geometry(crs=)` logical type (GeoParquet
+  2.0), via `geoarrow-pyarrow`. Combined with the V3 manifest avro
+  work and spec-minimal metadata.json, the testbed now ships a
+  reference V3 catalog that *engines should be tested against*. We
+  no longer treat any single engine's strictness as the bar to clear;
+  if Snowflake/Databricks/DuckDB/BigQuery reject this fixture, those
+  are engine-side gaps to file. Snowflake's unmanaged reader is the
+  strictest — it still rejects because it requires the V3 row-lineage
+  columns physically present even when `row-lineage: false` in
+  metadata. We document that as a Snowflake-side issue rather than
+  bend the reference catalog to match it.
 - **2026-05-26 (much later)** — Ran the Snowflake-managed V3 path
   (Path 1 from the engines/snowflake/README): `CREATE ICEBERG TABLE
   ... GEOMETRY ... ICEBERG_VERSION=3`. **Worked end-to-end at L3+.**

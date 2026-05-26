@@ -1,18 +1,29 @@
-"""V3 Iceberg with a native `geometry(OGC:CRS84)` column.
+"""V3 Iceberg with a native `geometry` column.
 
-The metadata.json declares format-version: 3 and the column type as
-`geometry(OGC:CRS84)`. The manifest carries per-file lower_bound / upper_bound
-for the geometry column. We try multiple bound encodings because there's no
-canonical "this is what DuckDB expects" today.
+The reference V3 geo fixture for this testbed. Goals:
 
-Expected DuckDB 1.5.3 result (May 2026): the bound deserialization step in
-`IcebergValue::DeserializeValue` has no GEOMETRY case, so it bails with
-  Invalid Configuration Error: Column geom lower bound deserialization failed:
-  Failed to deserialize blob ... attempting to produce value of type
-  'GEOMETRY(\\'OGC:CRS84\\')'
+  - **GeoParquet 2.0 typed parquet files.** The `geom` column is written
+    with Parquet's native `Geometry` logical type (`BYTE_ARRAY` physical,
+    WKB encoded), via the `geoarrow-pyarrow` extension. This matches the
+    V3-era Iceberg + Parquet spec direction and is what a real V3 reader
+    expects to see.
 
-This file exists to make the failure reproducible and to be the asserting
-test that flips to GREEN when DuckDB ships the GEOMETRY branch.
+  - **Spec-minimal V3.** `format-version: 3` with `row-lineage: false`
+    explicitly. We do NOT emit the V3 row-lineage metadata columns
+    (`_row_id`, `_last_updated_sequence_number`) — the spec permits
+    leaving them out when row lineage is off. Engines that require them
+    regardless (e.g. Snowflake's V3 unmanaged reader appears to) are
+    being stricter than the spec; we document that as the engine's
+    behavior, not adapt to it.
+
+  - **V3 manifest avro** with per-file geometry bounds in the
+    `packed_xy_le` encoding (16 bytes: little-endian X, little-endian
+    Y), `first_row_id` populated, and the V3-shape avro metadata
+    Snowflake's own writer produces (verified by direct comparison).
+
+This is intended to be the *reference catalog* that V3 readers test
+against. If a reader rejects this fixture, that's a reader-side gap to
+file, not a catalog-side bug to fix.
 """
 
 from __future__ import annotations
@@ -23,6 +34,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import geoarrow.pyarrow as ga
 from pyiceberg.schema import Schema
 from pyiceberg.types import BinaryType, NestedField, StringType
 
@@ -38,16 +50,22 @@ def _field_meta(field_id: int) -> dict:
 
 # pyiceberg 0.11.1 has no GeometryType — fall back to BinaryType in the python
 # schema (used only by the manifest writer to validate field types). The actual
-# column type is declared in the hand-written metadata.json below.
+# column type is declared in the hand-written metadata.json (as bare
+# "geometry") and in the parquet file (as native Geometry logical type via
+# geoarrow-pyarrow).
 PY_SCHEMA = Schema(
     NestedField(1, "id", StringType(), required=False),
     NestedField(2, "geom", BinaryType(), required=False),
 )
 
+# The geom field is written as a geoarrow.wkb extension array which
+# serializes to Parquet's native `Geometry(crs=)` logical type.
+GEOM_EXT_TYPE = ga.wkb().with_crs(ga.OGC_CRS84)
+
 ARROW_SCHEMA = pa.schema(
     [
         pa.field("id", pa.string(), nullable=True, metadata=_field_meta(1)),
-        pa.field("geom", pa.binary(), nullable=True, metadata=_field_meta(2)),
+        pa.field("geom", GEOM_EXT_TYPE, nullable=True, metadata=_field_meta(2)),
     ]
 )
 
@@ -55,23 +73,20 @@ ARROW_SCHEMA = pa.schema(
 def _write_parquet(region) -> Path:
     rng = random.Random(stable_seed(region.name))
     rows = 1000
-    ids, geoms = [], []
+    ids, wkbs = [], []
     for i in range(rows):
         x = rng.uniform(region.xmin, region.xmax)
         y = rng.uniform(region.ymin, region.ymax)
         ids.append(f"{region.name}-{i}")
-        geoms.append(wkb_point_le(x, y))
-    table = pa.table(
-        {
-            "id": pa.array(ids, type=pa.string()),
-            "geom": pa.array(geoms, type=pa.binary()),
-        },
-        schema=ARROW_SCHEMA,
-    )
+        wkbs.append(wkb_point_le(x, y))
+    geom_arr = GEOM_EXT_TYPE.wrap_array(pa.array(wkbs, type=pa.binary()))
+    table = pa.table({"id": pa.array(ids, type=pa.string()), "geom": geom_arr},
+                     schema=ARROW_SCHEMA)
     out_dir = ROOT / "data"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{region.name}.parquet"
-    pq.write_table(table, out, compression="zstd")
+    pq.write_table(table, out, compression="zstd",
+                   store_schema=True, write_statistics=True)
     return out
 
 
