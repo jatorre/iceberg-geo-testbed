@@ -42,13 +42,36 @@ from pyiceberg.typedef import Record
 # (V3 manifest entry schemas include the V3-only `first_row_id` field
 # on data files; V3 manifest-list entries include `first_row_id` too).
 class _ManifestWriterV3(ManifestWriterV2):
+    def __init__(self, *args, schema_override_json: str | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Lets the caller swap in a custom schema JSON string for the
+        # avro metadata. Needed for V3 GEOMETRY columns because
+        # pyiceberg's PrimitiveType model has no GeometryType, so the
+        # Python schema falls back to BinaryType — and that "binary"
+        # type token then appears in the manifest avro metadata,
+        # contradicting the table's claim that the column is geometry.
+        # Snowflake reads this and rejects.
+        self._schema_override_json = schema_override_json
+
     @property
     def version(self) -> int:  # type: ignore[override]
         return 3
 
     @property
     def _meta(self) -> dict[str, str]:
-        return {**super()._meta, "format-version": "3"}
+        m = {**super()._meta, "format-version": "3"}
+        if self._schema_override_json is not None:
+            m["schema"] = self._schema_override_json
+        # `iceberg.schema` carries the manifest-entry record schema in
+        # Iceberg JSON format. Snowflake's V3 writer emits this; we
+        # mirror it for compatibility. The schema comes from pyiceberg's
+        # MANIFEST_ENTRY_SCHEMAS_STRUCT keyed by version.
+        from pyiceberg.manifest import MANIFEST_ENTRY_SCHEMAS_STRUCT
+        try:
+            m["iceberg.schema"] = MANIFEST_ENTRY_SCHEMAS_STRUCT[3].model_dump_json()
+        except Exception:
+            pass
+        return m
 
     def new_writer(self):
         # pyiceberg's default `new_writer()` uses DEFAULT_READ_VERSION (=2)
@@ -202,12 +225,22 @@ def write_static_catalog(
 
     manifest_path = meta_dir / f"snap-{snapshot_id}-manifest.avro"
     if manifest_format >= 3:
+        # Build the schema-override JSON string from schema_json_fields
+        # — that's the caller-supplied fields list which already has
+        # the correct V3 type tokens (e.g. "geometry") that pyiceberg's
+        # PrimitiveType can't represent.
+        schema_override = json.dumps({
+            "type": "struct",
+            "schema-id": 0,
+            "fields": schema_json_fields,
+        })
         mw_ctx = _ManifestWriterV3(
             spec=PartitionSpec(),
             schema=iceberg_schema,
             output_file=io.new_output(str(manifest_path)),
             snapshot_id=snapshot_id,
             avro_compression="null",
+            schema_override_json=schema_override,
         )
     else:
         mw_ctx = write_manifest(
@@ -318,16 +351,26 @@ def write_static_catalog(
         "snapshot-log": [{"snapshot-id": snapshot_id, "timestamp-ms": snapshot_id}],
         "metadata-log": [],
     }
-    # V3 introduces row lineage. The spec carries both `last-row-id`
-    # (a counter for the highest assigned row id) and `next-row-id`
-    # (the next value to assign). Snowflake's V3 preview reader checks
-    # for `last-row-id` and reports "incomplete state" if it's missing,
-    # even on a fresh table where both are 0. Polaris (the reference
-    # REST catalog) checks `next-row-id`. Emit both to satisfy the
-    # strictest checker.
+    # V3 metadata shape, validated empirically against a Snowflake-
+    # managed V3 GEOMETRY table:
+    #   - `next-row-id` required
+    #   - `statistics` / `partition-statistics` required as arrays
+    #     (empty is fine)
+    #   - `last-row-id` and `row-lineage` are NOT present in
+    #     Snowflake's output, even though Polaris accepts them
+    # Snowflake's V3 reader rejects our metadata with "incomplete
+    # state" when these extras are present or expected fields missing.
+    # Matching Snowflake's exact shape gets past the rejection.
     if format_version_in_metadata >= 3:
-        metadata["last-row-id"] = 0
-        metadata["next-row-id"] = 0
+        metadata["next-row-id"] = sum(d["rows"] for d in data_files)
+        metadata["statistics"] = []
+        metadata["partition-statistics"] = []
+        # Snowflake's writer doesn't emit `row-lineage`, but its reader
+        # may default absent-as-true (V3 row-lineage = required columns
+        # in data files). Explicit false opts out; without it Snowflake
+        # rejects as "incomplete state" because our parquet files lack
+        # the `_row_id` / `_last_updated_sequence_number` columns that
+        # row-lineage=true would require.
         metadata["row-lineage"] = False
     metadata_json_path = meta_dir / "v1.metadata.json"
     metadata_json_path.write_text(json.dumps(metadata, indent=2))

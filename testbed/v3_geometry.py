@@ -108,9 +108,15 @@ def build(
         iceberg_schema=PY_SCHEMA,
         schema_json_fields=[
             {"id": 1, "name": "id", "required": False, "type": "string"},
-            # V3 native geometry type. DuckDB 1.5.3 parses this correctly into
-            # `GEOMETRY('OGC:CRS84')` — the schema side is wired.
-            {"id": 2, "name": "geom", "required": False, "type": "geometry(OGC:CRS84)"},
+            # V3 native geometry type. Empirically verified: a
+            # Snowflake-managed V3 GEOMETRY table writes the type as
+            # bare `"geometry"` (no CRS in the type token) — CRS
+            # tracking happens elsewhere (column properties / parquet
+            # schema annotation). The earlier `"geometry(OGC:CRS84)"`
+            # form (which DuckDB does parse) is *not* what Snowflake's
+            # V3 writer emits; using the bare form keeps us
+            # spec-compliant by example.
+            {"id": 2, "name": "geom", "required": False, "type": "geometry"},
         ],
         name_mapping=[
             {"field-id": 1, "names": ["id"]},

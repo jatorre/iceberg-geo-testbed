@@ -10,13 +10,25 @@ and `v2_geo_convention` (the GeoIceberg V2 spec reference impl). Snowflake
 serves `COUNT(*)` with the bbox predicate from manifest `record_count`
 directly — even stronger than file-level pruning.
 
-**V3 fixture: blocked** with a specific and actionable error
-(`incomplete state — Please complete the upgrade`). Root cause: pyiceberg
-0.11.1 writes V2-format manifest avros while our metadata.json claims
-V3; Snowflake's V3 reader catches the inconsistency. Other engines
-(Polaris, Iceberg-Spark) accept this hybrid.
+**V3 geometry via Snowflake-managed path: ✅ verified end-to-end.**
+`CREATE ICEBERG TABLE … GEOMETRY ICEBERG_VERSION=3` works; spatial
+predicates return correct rows; manifest geometry-bound pruning fires
+(`bytes_scanned=0` even on the spatial query). Snowflake is the first
+engine in this testbed where the V3 geometry headline feature
+actually delivers.
 
-Run `python engines/snowflake/run.py` to reproduce.
+**V3 geometry via static-metadata unmanaged path: ❌ blocked.** Our
+hand-written V3 fixtures (now structurally matching Snowflake's own
+metadata.json + V3 manifest avro byte-for-byte) are still rejected
+with `incomplete state`. The remaining gap: Snowflake's V3 unmanaged
+reader requires the row-lineage metadata columns
+(`METADATA$RL_ROW_ID`, `METADATA$RL_LAST_UPDATED_SEQUENCE_NUMBER`)
+to be physically present in the parquet data files, even when
+metadata.json doesn't claim `row-lineage: true`.
+
+Run `python engines/snowflake/run.py` to reproduce; see
+`engines/snowflake/_managed_v3_test.py` for the Path-1 managed V3
+experiment.
 
 ## The 091369 IAM trap (public service announcement)
 

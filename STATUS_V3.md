@@ -42,7 +42,7 @@ Cell values:
 | **DuckDB 1.5.3** | ✅ — schema parses, `COUNT(*)` works | ❌ — `Unimplemented type for cast (BLOB → GEOMETRY('OGC:CRS84'))` on the parquet reader path | ❌ — bound deserializer (`IcebergValue::DeserializeValue`) has no GEOMETRY branch; crashes on first spatial predicate. See [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002). | ❌ — blocked by N2/N3 today; tracking PR. Per PR description: *"This PR doesn't add support for upper bound and lower bounds for the geometry type. That is something we will add later."* | ❓ — not tested |
 | **BigQuery / BigLake** (2026-05) | ❌ — `Unknown Iceberg type "geometry(OGC:CRS84)"` at `CREATE EXTERNAL TABLE` | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `GEOGRAPHY` type also explicitly unsupported per [icebergmatrix.org](https://icebergmatrix.org/) |
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | ❌ — `Cannot parse type string to primitive: geometry(OGC:CRS84)` on `spark.read.format('iceberg').load(...)` | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `iceberg-spark-runtime` rejects Sedona's Geometry UDT: `java.lang.UnsupportedOperationException: User-defined types are not supported at SparkTypeVisitor.visit`. Even the reference V3 toolchain can't write native geometry today. |
-| **Snowflake (preview)** | ❓ — **untested**. Our hand-written V3 fixture is not spec-compliant: `format-version: 3` in metadata.json but V2-format manifest avro (pyiceberg 0.11.1 hardcodes V2 manifest writes). Snowflake's V3 reader correctly catches this inconsistency and rejects with `Iceberg table 'V3_GEOMETRY' is V3 but is in an incomplete state.` Polaris and Iceberg-Spark are more permissive and accept the hybrid, which is what let us probe DuckDB's V3 path. To test Snowflake's claimed `full` V3 support per [icebergmatrix.org](https://icebergmatrix.org/), we'd need either (a) a Snowflake-managed V3 table that Snowflake itself writes (testable; pending), (b) a true V3 manifest avro writer in pyiceberg ([#1818](https://github.com/apache/iceberg-python/issues/1818)), or (c) hand-implement V3 manifest avro in this testbed. | ❓ | ❓ | ❓ | ❓ |
+| **Snowflake (GA May 2026)** | ✅ verified via Snowflake-managed V3 path (`ICEBERG_VERSION=3` required — default for new Iceberg tables is V2; the error message `Unsupported data type 'GEOMETRY' for iceberg tables` doesn't hint at the V3 opt-in needed). Reads its own metadata cleanly. | ✅ — `SELECT geom` materializes as `GEOMETRY(4326)` | ✅ — `WHERE ST_INTERSECTS(geom, envelope)` returns the right rows | ✅ — `bytes_scanned=0` on the spatial predicate; Snowflake's manifest geometry-bound pruning is wired through end-to-end | ✅ — full write path works with `CATALOG='SNOWFLAKE'`. Writes Parquet-native `Geometry` columns (GeoParquet 2.0 style) + V3 manifest avro with `first_row_id`/geometry bounds populated using `packed_xy_le` (16-byte LE-double-X, LE-double-Y) — empirically matches the bound encoding our testbed produces. Caveat: Snowflake's V3 *unmanaged* reader (reading externally-written V3 metadata) is stricter than the managed write path — even with structurally-matching metadata.json + V3 manifest avro, it rejects fixtures whose data files lack the physical `METADATA$RL_ROW_ID` / `METADATA$RL_LAST_UPDATED_SEQUENCE_NUMBER` row-lineage columns. So Snowflake V3 reads its own V3 tables, but a third-party-written V3 fixture (which our testbed produces) won't be accepted unless those data-file columns are present too. |
 | **Databricks (DBSQL 2026.10)** | ❌ — `[UNSUPPORTED_DATATYPE] Unsupported data type "GEOMETRY"` at parser level (same for `GEOGRAPHY`). [Databricks's own docs](https://docs.databricks.com/aws/en/iceberg/) acknowledge geospatial as a V3 feature; icebergmatrix.org states *"Geospatial types are explicitly not supported in Databricks Iceberg v3 implementation."* | ❌ | ❌ | ❌ | ❌ |
 | **Oracle ADB 26ai (23.26.2.2.0)** | ❓ — V3 metadata path-based reads are blocked separately by Oracle's parser strictness on pyiceberg-emitted manifests (see V2 status). Can't isolate the V3 question until the V2 read works. | ❓ | ❓ | ❓ | ❓ — not in icebergmatrix.org's coverage |
 | **Apache Polaris** (reference REST catalog) | ✅ — registers V3 tables via `POST .../register` once metadata includes the required `next-row-id` and `row-lineage` fields (caught a real pyiceberg 0.11.1 gap we patched in `testbed/_static_catalog.py`) | n/a — Polaris is a catalog, not a query engine | n/a | n/a | n/a |
@@ -53,19 +53,27 @@ Cell values:
 
 As of mid-2026:
 
-- **N1 is implemented on 1 of 6 engines we tested** (DuckDB). One more
-  (Snowflake) claims it in preview; we couldn't verify.
-- **N2–N4 are implemented on 0 engines** we tested (Snowflake's
-  preview claims are unverified).
-- **W1 is implemented on 0 engines** we tested. Sedona/Iceberg-Spark
-  — the supposed reference implementation — has a *known and named*
-  blocker: `iceberg-spark-runtime` doesn't have a UDT→IcebergGeometryType
-  mapper, so the official write path doesn't exist either.
+- **Snowflake is the first engine** we've verified that delivers N1–N4
+  + W1 end-to-end. With `ICEBERG_VERSION = 3` opted in, it accepts
+  `GEOMETRY` columns, materializes them via SQL, applies spatial
+  predicates correctly, and uses manifest geometry bounds for file
+  pruning. Caveat: their V3 *unmanaged* reader (consuming externally-
+  written V3 fixtures) is stricter than the managed write path — see
+  the table note.
+- **DuckDB is at N1 only** — schema parses but the bound deserializer
+  and the BLOB→GEOMETRY cast are both missing. PR target identified.
+- **Other engines** (BigQuery, Sedona/Iceberg-Spark, Databricks)
+  reject the V3 geometry type at parse, before reaching N2.
+- **W1 outside of Snowflake**: Sedona/Iceberg-Spark — the supposed
+  reference implementation — has `iceberg-spark-runtime` lacking the
+  UDT→IcebergGeometryType mapper. pyiceberg V3 writes are incomplete
+  (tracked at #1818). Snowflake-managed is the only working V3
+  geometry writer we found.
 
-This is the empirical reason
-[**STATUS_V2.md**](./STATUS_V2.md) and the
-[**GeoIceberg V2 spec**](./SPEC.md) exist. The V3 story will mature.
-Until it does, the convention bridges the gap.
+This is the empirical reason [**STATUS_V2.md**](./STATUS_V2.md) and
+the [**GeoIceberg V2 spec**](./SPEC.md) exist. The V3 story is *just*
+beginning to ship in one engine (Snowflake managed). Until it spreads,
+the V2 convention bridges the gap.
 
 ## What each cell would need to flip
 
@@ -145,15 +153,23 @@ to the changelog.
   to emit a genuinely spec-compliant V3 manifest avro: subclassed
   `ManifestWriterV2` and `ManifestListWriterV2` to override
   `new_writer()` and `__enter__()` respectively, using `V3` instead of
-  `DEFAULT_READ_VERSION` (=2) for the record schema. Without this
-  fix, pyiceberg's writer would silently drop V3-only fields like
-  `data_file.first_row_id` and `manifest_file.first_row_id` even
-  when the file format-version says 3. Verified the V3 fields are
-  now populated in the avro bytes (`first_row_id` values 0, 1000,
-  2000, ... per data file). **Snowflake still rejects with the same
-  "incomplete state" error.** So there's another V3-spec requirement
-  beyond manifest avro structure that we're missing — possibly schema
-  field-level markers (`initial-default` / `write-default`), partition
-  spec V3 changes (`source-ids` plural), or Snowflake-specific
-  requirements not in the public V3 spec. Worth opening a Snowflake
-  support follow-up to find out which.
+  `DEFAULT_READ_VERSION` (=2) for the record schema. Verified the V3
+  fields are now populated in the avro bytes (`first_row_id` values
+  0, 1000, ... per data file).
+- **2026-05-26 (much later)** — Ran the Snowflake-managed V3 path
+  (Path 1 from the engines/snowflake/README): `CREATE ICEBERG TABLE
+  ... GEOMETRY ... ICEBERG_VERSION=3`. **Worked end-to-end at L3+.**
+  Discovered: (1) `ICEBERG_VERSION=3` is required (default is V2);
+  (2) Snowflake's V3 manifest geometry bounds use `packed_xy_le`
+  (LE-double-X then LE-double-Y, 16 bytes) — empirically matches our
+  testbed's encoding; (3) Snowflake's V3 parquet files use the native
+  `Geometry(crs=)` Parquet logical type (GeoParquet 2.0); (4) Their
+  V3 parquet files physically contain `METADATA$RL_ROW_ID` and
+  `METADATA$RL_LAST_UPDATED_SEQUENCE_NUMBER` row-lineage columns.
+  Iterated our V3 writer to match Snowflake's metadata.json shape
+  exactly (next-row-id / statistics / partition-statistics; bare
+  `"geometry"` type token; iceberg.schema manifest-meta key). All
+  structural diffs eliminated. Still rejected with "incomplete state"
+  on the unmanaged read path — almost certainly because our parquet
+  data files lack the physical row-lineage metadata columns
+  Snowflake's V3 reader requires.
