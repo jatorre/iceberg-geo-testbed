@@ -68,6 +68,36 @@ The Snowflake-managed V3 table lives at
 `gs://cartobq-iceberg-geo-testbed-eu/managed-v3-geo.MLyhYkeQ/` and is
 publicly readable; we use it as a second cross-engine reference.
 
+### DuckDB ↔ Snowflake Horizon REST catalog (not yet tested)
+
+DuckDB also supports attaching an Iceberg REST catalog directly
+(`ATTACH '<name>' AS cat (TYPE iceberg, ENDPOINT '...')`). Snowflake
+exposes managed Iceberg tables via the Horizon Catalog REST API at
+`https://<account>.snowflakecomputing.com/polaris/api/catalog`. In
+principle DuckDB can ATTACH to that endpoint and discover the V3
+geometry table, reading the same data as the direct GCS URL test
+above but via the catalog API.
+
+**Not tested yet** because Snowflake Horizon's OAuth flow strictly
+requires JWT key-pair authentication — `invalid_client` /
+`invalid_scope` errors on password-as-secret and PAT-as-bearer
+attempts. Completing this test needs:
+
+1. Generate an RSA keypair locally (`openssl genrsa`).
+2. `ALTER USER … SET RSA_PUBLIC_KEY = '<base64-public-key>';`
+3. Sign a JWT with the private key, claims `iss/sub/aud/iat/exp`
+   per Snowflake's spec.
+4. Use the JWT as `client_secret` with `grant_type=client_credentials`
+   + `scope=session:role:ACCOUNTADMIN` to get a Polaris access token.
+5. Pass that token to DuckDB via `CREATE SECRET … TYPE iceberg …` and
+   `ATTACH … TYPE iceberg, SECRET …`.
+
+Since the direct-GCS-URL test already proves DuckDB reads Snowflake's
+V3 data at L2, the Horizon-REST test would mostly validate the
+**catalog-attach path** as an interoperability mechanism — useful for
+a published convention but not strictly needed for the data-interop
+claim.
+
 Notably, the lineage fixture didn't flip any engine result during our
 testing:
 
