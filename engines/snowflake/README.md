@@ -102,14 +102,25 @@ Ways to actually test Snowflake's V3 geometry:
    documented elsewhere); pyiceberg V3 writer is incomplete (tracked
    at [iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818));
    Wherobots' Sedona fork might — worth checking.
-3. **Hand-write V3 manifest avro.** Extend `_static_catalog.py` to
-   emit V3-spec manifest avro. Real implementation work; effectively
-   filling in pyiceberg's missing feature ourselves.
+3. **Hand-write V3 manifest avro.** We did this. `testbed/_static_catalog.py`
+   subclasses `ManifestWriterV2` and `ManifestListWriterV2` to override
+   the schema selection (pyiceberg defaults `record_schema` to
+   `DEFAULT_READ_VERSION` (=2), silently dropping V3-only fields). With
+   that fix, our fixtures emit spec-compliant V3 manifest avros with
+   `first_row_id` populated correctly. **Snowflake still rejects** with
+   the same "incomplete state" error — so there's at least one more
+   V3-spec requirement we're missing. Candidates: schema field-level
+   `initial-default`/`write-default` markers, partition-spec V3 changes
+   (`source-ids` plural), or Snowflake-specific requirements outside
+   the public V3 spec.
 
-Path 1 is the fastest practical test if all we want is to know whether
-Snowflake's V3 geometry works end-to-end. It doesn't test cross-engine
-interop on V3, but cross-engine V3 interop is moot today anyway given
-no other engine reads V3 geometry past type-recognition.
+So even though we contributed a working V3 manifest writer (which
+pyiceberg's roadmap still has as an open item), it isn't sufficient
+to satisfy Snowflake. Worth a Snowflake support follow-up to ask
+exactly what's still "incomplete."
+
+Path 1 remains the fastest practical test — sidesteps our writer
+limitations entirely.
 
 ## Files
 

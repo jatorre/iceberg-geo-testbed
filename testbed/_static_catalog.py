@@ -15,17 +15,121 @@ from pathlib import Path
 
 from pyiceberg.io.pyarrow import PyArrowFileIO
 from pyiceberg.manifest import (
+    AVRO_CODEC_KEY,
     DataFile,
     DataFileContent,
     FileFormat,
     ManifestEntry,
     ManifestEntryStatus,
+    ManifestFile,
+    ManifestListWriterV2,
+    ManifestWriterV2,
+    MANIFEST_LIST_FILE_SCHEMAS,
+    UNASSIGNED_SEQ,
+    construct_partition_summaries,
     write_manifest,
     write_manifest_list,
 )
 from pyiceberg.partitioning import PartitionSpec
 from pyiceberg.schema import Schema
 from pyiceberg.typedef import Record
+
+
+# pyiceberg 0.11.1 has manifest schemas defined for V1/V2/V3 but the
+# write_manifest() / write_manifest_list() entrypoints explicitly reject
+# version=3. We unblock V3 writes by subclassing the V2 writers and just
+# overriding the version property. The schemas keyed off `self.version`
+# (V3 manifest entry schemas include the V3-only `first_row_id` field
+# on data files; V3 manifest-list entries include `first_row_id` too).
+class _ManifestWriterV3(ManifestWriterV2):
+    @property
+    def version(self) -> int:  # type: ignore[override]
+        return 3
+
+    @property
+    def _meta(self) -> dict[str, str]:
+        return {**super()._meta, "format-version": "3"}
+
+    def new_writer(self):
+        # pyiceberg's default `new_writer()` uses DEFAULT_READ_VERSION (=2)
+        # for the *record* schema, even when the file schema is V3. That
+        # silently drops V3-only fields like data_file.first_row_id
+        # because the Python object's V3 positions aren't read. We
+        # override to use our V3 version for both schemas so V3 fields
+        # actually make it into the avro bytes.
+        from pyiceberg.avro.file import AvroOutputFile
+        from pyiceberg.manifest import ManifestEntry
+        return AvroOutputFile[ManifestEntry](
+            output_file=self._output_file,
+            file_schema=self._with_partition(self.version),
+            record_schema=self._with_partition(self.version),
+            schema_name="manifest_entry",
+            metadata=self._meta,
+        )
+
+    def to_manifest_file(self) -> ManifestFile:
+        # Same as the parent but bind the ManifestFile to V3 so the
+        # V3-only `first_row_id` slot exists on the Python object.
+        # The caller is responsible for setting that slot afterwards
+        # (manifest._data[15] = first_row_id_for_this_manifest).
+        self.closed = True
+        min_seq = self._min_sequence_number or UNASSIGNED_SEQ
+        return ManifestFile.from_args(
+            _table_format_version=3,
+            manifest_path=self._output_file.location,
+            manifest_length=len(self._writer.output_file),
+            partition_spec_id=self._spec.spec_id,
+            content=self.content(),
+            sequence_number=UNASSIGNED_SEQ,
+            min_sequence_number=min_seq,
+            added_snapshot_id=self._snapshot_id,
+            added_files_count=self._added_files,
+            existing_files_count=self._existing_files,
+            deleted_files_count=self._deleted_files,
+            added_rows_count=self._added_rows,
+            existing_rows_count=self._existing_rows,
+            deleted_rows_count=self._deleted_rows,
+            partitions=construct_partition_summaries(self._spec, self._schema, self._partitions),
+            key_metadata=None,
+            first_row_id=0,
+        )
+
+
+class _ManifestListWriterV3(ManifestListWriterV2):
+    def __init__(self, output_file, snapshot_id, parent_snapshot_id, sequence_number, compression):
+        # Call ManifestListWriter.__init__ directly so we control the
+        # meta keys without going through the V2-hardcoded path.
+        from pyiceberg.manifest import ManifestListWriter
+        ManifestListWriter.__init__(
+            self,
+            format_version=3,
+            output_file=output_file,
+            meta={
+                "snapshot-id": str(snapshot_id),
+                "parent-snapshot-id": str(parent_snapshot_id) if parent_snapshot_id is not None else "null",
+                "sequence-number": str(sequence_number),
+                "format-version": "3",
+                AVRO_CODEC_KEY: compression,
+            },
+        )
+        self._commit_snapshot_id = snapshot_id
+        self._sequence_number = sequence_number
+
+    def __enter__(self):
+        # Same fix as on the manifest entry writer — V3 record_schema, not
+        # DEFAULT_READ_VERSION (which is 2). Otherwise the V3-only
+        # first_row_id field on each ManifestFile entry is silently
+        # dropped during avro serialization.
+        from pyiceberg.avro.file import AvroOutputFile
+        self._writer = AvroOutputFile[ManifestFile](
+            output_file=self._output_file,
+            record_schema=MANIFEST_LIST_FILE_SCHEMAS[self._format_version],
+            file_schema=MANIFEST_LIST_FILE_SCHEMAS[self._format_version],
+            schema_name="manifest_file",
+            metadata=self._meta,
+        )
+        self._writer.__enter__()
+        return self
 
 
 def write_static_catalog(
@@ -89,34 +193,69 @@ def write_static_catalog(
     sequence_number = 1
     io = PyArrowFileIO()
 
+    # pyiceberg has manifest avro schemas defined for V1/V2/V3 but its
+    # writer historically defaulted to V2. We pass V3 explicitly when
+    # the table metadata claims V3, so the manifest avro is also V3-
+    # spec-compliant (Snowflake's V3 reader requires this consistency;
+    # V2 readers are more permissive and accept the V2 fixture path).
+    manifest_format = 3 if format_version_in_metadata >= 3 else 2
+
     manifest_path = meta_dir / f"snap-{snapshot_id}-manifest.avro"
-    with write_manifest(
-        format_version=2,  # pyiceberg 0.11.1 only writes V2 manifests
-        spec=PartitionSpec(),
-        schema=iceberg_schema,
-        output_file=io.new_output(str(manifest_path)),
-        snapshot_id=snapshot_id,
-        avro_compression="null",
-    ) as mw:
-        for df in data_files:
-            mw.add_entry(
-                ManifestEntry.from_args(
+    if manifest_format >= 3:
+        mw_ctx = _ManifestWriterV3(
+            spec=PartitionSpec(),
+            schema=iceberg_schema,
+            output_file=io.new_output(str(manifest_path)),
+            snapshot_id=snapshot_id,
+            avro_compression="null",
+        )
+    else:
+        mw_ctx = write_manifest(
+            format_version=manifest_format,
+            spec=PartitionSpec(),
+            schema=iceberg_schema,
+            output_file=io.new_output(str(manifest_path)),
+            snapshot_id=snapshot_id,
+            avro_compression="null",
+        )
+    with mw_ctx as mw:
+        for i, df in enumerate(data_files):
+            data_file_args = dict(
+                content=DataFileContent.DATA,
+                file_path=f"{location_uri}/{df['path']}",
+                file_format=FileFormat.PARQUET,
+                partition=Record(),
+                record_count=df["rows"],
+                file_size_in_bytes=df["size"],
+                lower_bounds=df["lower"],
+                upper_bounds=df["upper"],
+            )
+            if manifest_format >= 3:
+                # V3 adds `first_row_id` to each data file — the row_id of
+                # the first row in this file. For a fresh table where no
+                # rows have been assigned ids, we use a monotonic counter
+                # offset by row counts of preceding files. Required for
+                # spec-compliant V3 manifests.
+                data_file_args["first_row_id"] = sum(d["rows"] for d in data_files[:i])
+                df_obj = DataFile.from_args(_table_format_version=3, **data_file_args)
+                me_obj = ManifestEntry.from_args(
+                    _table_format_version=3,
                     status=ManifestEntryStatus.ADDED,
                     snapshot_id=snapshot_id,
                     sequence_number=sequence_number,
                     file_sequence_number=sequence_number,
-                    data_file=DataFile.from_args(
-                        content=DataFileContent.DATA,
-                        file_path=f"{location_uri}/{df['path']}",
-                        file_format=FileFormat.PARQUET,
-                        partition=Record(),
-                        record_count=df["rows"],
-                        file_size_in_bytes=df["size"],
-                        lower_bounds=df["lower"],
-                        upper_bounds=df["upper"],
-                    ),
+                    data_file=df_obj,
                 )
-            )
+            else:
+                df_obj = DataFile.from_args(**data_file_args)
+                me_obj = ManifestEntry.from_args(
+                    status=ManifestEntryStatus.ADDED,
+                    snapshot_id=snapshot_id,
+                    sequence_number=sequence_number,
+                    file_sequence_number=sequence_number,
+                    data_file=df_obj,
+                )
+            mw.add_entry(me_obj)
     manifest = mw.to_manifest_file()
     # The manifest avro is written to the local meta_dir; in the manifest-list
     # we record it under `location_uri/metadata/...` so an engine pointing at
@@ -126,14 +265,24 @@ def write_static_catalog(
     manifest._data[0] = f"{location_uri}/metadata/{manifest_path.name}"
 
     manifest_list_path = meta_dir / f"snap-{snapshot_id}-manifest-list.avro"
-    with write_manifest_list(
-        format_version=2,
-        output_file=io.new_output(str(manifest_list_path)),
-        snapshot_id=snapshot_id,
-        parent_snapshot_id=None,
-        sequence_number=sequence_number,
-        avro_compression="null",
-    ) as mlw:
+    if manifest_format >= 3:
+        mlw_ctx = _ManifestListWriterV3(
+            output_file=io.new_output(str(manifest_list_path)),
+            snapshot_id=snapshot_id,
+            parent_snapshot_id=None,
+            sequence_number=sequence_number,
+            compression="null",
+        )
+    else:
+        mlw_ctx = write_manifest_list(
+            format_version=manifest_format,
+            output_file=io.new_output(str(manifest_list_path)),
+            snapshot_id=snapshot_id,
+            parent_snapshot_id=None,
+            sequence_number=sequence_number,
+            avro_compression="null",
+        )
+    with mlw_ctx as mlw:
         mlw.add_manifests([manifest])
 
     metadata = {

@@ -141,3 +141,19 @@ to the changelog.
   third-party tool that writes spec-compliant V3 manifest avro.
   Snowflake's `full` V3 claim per icebergmatrix.org remains
   unverified by us, but not invalidated.
+- **2026-05-26 (even later)** — Patched `testbed/_static_catalog.py`
+  to emit a genuinely spec-compliant V3 manifest avro: subclassed
+  `ManifestWriterV2` and `ManifestListWriterV2` to override
+  `new_writer()` and `__enter__()` respectively, using `V3` instead of
+  `DEFAULT_READ_VERSION` (=2) for the record schema. Without this
+  fix, pyiceberg's writer would silently drop V3-only fields like
+  `data_file.first_row_id` and `manifest_file.first_row_id` even
+  when the file format-version says 3. Verified the V3 fields are
+  now populated in the avro bytes (`first_row_id` values 0, 1000,
+  2000, ... per data file). **Snowflake still rejects with the same
+  "incomplete state" error.** So there's another V3-spec requirement
+  beyond manifest avro structure that we're missing — possibly schema
+  field-level markers (`initial-default` / `write-default`), partition
+  spec V3 changes (`source-ids` plural), or Snowflake-specific
+  requirements not in the public V3 spec. Worth opening a Snowflake
+  support follow-up to find out which.
