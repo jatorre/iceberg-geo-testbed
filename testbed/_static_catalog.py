@@ -169,11 +169,15 @@ def write_static_catalog(
         "snapshot-log": [{"snapshot-id": snapshot_id, "timestamp-ms": snapshot_id}],
         "metadata-log": [],
     }
-    # V3 introduces row lineage. `next-row-id` is required even on tables that
-    # don't use row IDs — Apache Polaris validates this strictly (the other
-    # engines we tested are more permissive). Caught by trying to register
-    # the v3_geometry fixture in a Polaris REST catalog.
+    # V3 introduces row lineage. The spec carries both `last-row-id`
+    # (a counter for the highest assigned row id) and `next-row-id`
+    # (the next value to assign). Snowflake's V3 preview reader checks
+    # for `last-row-id` and reports "incomplete state" if it's missing,
+    # even on a fresh table where both are 0. Polaris (the reference
+    # REST catalog) checks `next-row-id`. Emit both to satisfy the
+    # strictest checker.
     if format_version_in_metadata >= 3:
+        metadata["last-row-id"] = 0
         metadata["next-row-id"] = 0
         metadata["row-lineage"] = False
     metadata_json_path = meta_dir / "v1.metadata.json"

@@ -44,7 +44,7 @@ Cell values:
 | **DuckDB 1.5.3** | ✅ | ✅ — 1/10 files on California probe | ✅ — `ST_GeomFromWKB(geom_wkb)` returns POINT geometries | ❓ — `iceberg_scan()` doesn't expose table properties by default | ❌ — confirmed via Q3 in the testbed |
 | **BigQuery / BigLake** (2026-05) | ✅ — `CREATE EXTERNAL TABLE … OPTIONS(format='ICEBERG', uris=[…])` | ✅ — `total_bytes_processed` matches single-file scan | ✅ — `ST_GEOGFROMWKB(geom_wkb)` (note: returns GEOGRAPHY, not GEOMETRY) | ❓ | ❌ — same as GeoParquet's current state |
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | ✅ — via Spark's `read.format('iceberg').load(metadata_path)` | ✅ — distinct `input_file_name()` = 1 | ✅ — `ST_GeomFromWKB(geom_wkb)` returns Sedona Geometry | ❓ | ❌ |
-| **Snowflake (preview)** | catalog-only — requires EXTERNAL VOLUME + CATALOG INTEGRATION | ❓ — blocked by `091369` account bug in our testing | ❓ | ❓ | ❓ |
+| **Snowflake 10.19.100 (GCP_EUROPE_WEST2)** | catalog-only — requires `EXTERNAL VOLUME` + `CATALOG INTEGRATION` with `CATALOG_SOURCE = OBJECT_STORE`. *Key gotcha:* the GCS service account needs `storage.buckets.get` (via `roles/storage.legacyBucketReader`) in addition to `objectAdmin`, otherwise `CREATE ICEBERG TABLE` fails with the misleading `091369: Query needs to be retried to setup external volume`. `SYSTEM$VERIFY_EXTERNAL_VOLUME` doesn't catch this, and `ICEBERG_ACCESS_ERRORS` doesn't log it. Snowflake support confirmed; documented in [engines/snowflake/README.md](engines/snowflake/README.md). | ✅ — verified L3 on all three V2 fixtures (`v2_flat_columns`, `v2_bbox_struct`, `v2_geo_convention`); `bytes_scanned=0` because Snowflake answers `COUNT(*)` with bbox predicate from the manifest's `record_count` directly (no parquet read needed) | ✅ — `geom_wkb` exposes as BINARY; `TO_GEOMETRY(geom_wkb)` materializes points | ❓ — needs explicit `SHOW TBLPROPERTIES` test | ❓ |
 | **Databricks (DBSQL 2026.10)** | catalog-only — supports Unity / Glue / HMS / Snowflake Horizon; no generic Iceberg REST or static-metadata path | ❓ — would require staging via one of the supported catalogs | ✅ — `ST_*` functions exist but return strings, not typed geometries | ❓ | ❓ |
 | **Oracle ADB 26ai** | ⚠️ — `DBMS_CLOUD.CREATE_EXTERNAL_TABLE` syntax exists and works for some manifests, but rejects pyiceberg-emitted manifests with `ORA-20000: Iceberg parameter error`. Reader is stricter than the spec; likely fixable by also populating optional manifest stats (`column_sizes`, `value_counts`, `null_value_counts`). | ❓ — blocked by R1 today | ❓ | ❓ | ❓ |
 | **Apache Polaris** (reference REST catalog) | ✅ — registers via `POST /api/catalog/v1/{cat}/namespaces/{ns}/register` with a `metadata-location` pointing at our GCS metadata.json | n/a — Polaris is a catalog, not a query engine | n/a | n/a — Polaris exposes the property to client engines | n/a |
@@ -121,3 +121,10 @@ change.
   measured at R1+R2+R3. Snowflake/Databricks/Oracle have known
   blockers documented per engine. Polaris confirmed as spec validator.
   O1 unimplemented in any engine we tested.
+- **2026-05-26 (later)** — Snowflake unblocked. Snowflake support
+  identified the missing `storage.buckets.get` IAM permission as the
+  cause of the long-standing 091369 error. After granting
+  `roles/storage.legacyBucketReader` to the GCS service account,
+  all three V2 fixtures register cleanly and hit L3 file pruning
+  (Snowflake actually answers `COUNT(*)` queries from manifest
+  `record_count` alone — even stronger than file pruning).

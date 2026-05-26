@@ -1,93 +1,132 @@
-# Snowflake engine runner — blocked
+# Snowflake engine runner
 
-Status as of **2026-05-23.** Two account states tried; both blocked.
+Status as of **2026-05-26.** Account `KQ34251` (Snowflake `10.19.100`,
+hosted on `GCP_EUROPE_WEST2`).
 
-## Account A — `SXA81489` (CARTO dev, shared)
+## TL;DR
 
-Discovery only. The available role (`TEST_ROLE`) cannot
-`CREATE EXTERNAL VOLUME` — the privilege is account-scoped and requires
-`ACCOUNTADMIN`. No external volumes exist for us to reuse. The one
-existing storage integration is wired for EXTERNAL_STAGE (file loading),
-not Iceberg external volumes.
+**V2 fixtures: L3 on Snowflake** for `v2_flat_columns`, `v2_bbox_struct`,
+and `v2_geo_convention` (the GeoIceberg V2 spec reference impl). Snowflake
+serves `COUNT(*)` with the bbox predicate from manifest `record_count`
+directly — even stronger than file-level pruning.
 
-To unblock this account, ACCOUNTADMIN would need to:
-- Create an external volume backed by S3 (the account is on AWS_US_EAST_1)
-- Grant USAGE on it to `TEST_ROLE`
+**V3 fixture: blocked** with a specific and actionable error
+(`incomplete state — Please complete the upgrade`). Root cause: pyiceberg
+0.11.1 writes V2-format manifest avros while our metadata.json claims
+V3; Snowflake's V3 reader catches the inconsistency. Other engines
+(Polaris, Iceberg-Spark) accept this hybrid.
 
-## Account B — `KJEIDXA-IK05112` (personal trial, GCP_EUROPE_WEST2)
+Run `python engines/snowflake/run.py` to reproduce.
 
-We have `ACCOUNTADMIN` here. Got further but hit a different wall.
+## The 091369 IAM trap (public service announcement)
 
-What works:
-- `CREATE EXTERNAL VOLUME` against either the US public bucket or a
-  same-region (EU) public bucket.
-- `SYSTEM$VERIFY_EXTERNAL_VOLUME(...)` returns
-  `success: true` with `writeResult/readResult/listResult/deleteResult = PASSED`
-  once Snowflake's GCP service account
-  (`nkxeengujz@gcpeuropewest2-1-4e2d.iam.gserviceaccount.com`) is granted
-  `objectAdmin` on the bucket. (Public-read alone isn't sufficient for verify
-  — Snowflake's check requires write/list/delete to all pass.)
-- `CREATE CATALOG INTEGRATION ICEBERG_FILES CATALOG_SOURCE = OBJECT_STORE
-  TABLE_FORMAT = ICEBERG ENABLED = TRUE` succeeds.
+If you're hitting `091369: Query needs to be retried to setup external
+volume for Iceberg table` on Snowflake, this section is the cause.
 
-What does **not** work:
-- **Any** `CREATE ICEBERG TABLE` (managed *or* unmanaged) against the
-  verified external volume fails with:
+The error is **misleading**. Retries don't help, and the underlying
+problem isn't logged anywhere obvious:
 
-      091369 (55000): Query needs to be retried to setup external volume
-      for Iceberg table <NAME>. Please retry the query.
+- `SYSTEM$VERIFY_EXTERNAL_VOLUME` returns `success: true` with all four
+  sub-checks (`writeResult/readResult/listResult/deleteResult`) PASSED.
+  But `VERIFY` only tests **object-level** permissions
+  (`storage.objects.*`).
+- `SNOWFLAKE.MONITORING.ICEBERG_ACCESS_ERRORS` returns zero rows.
 
-  The error is misleading — retries don't help. We exhaustively tested:
-  retry-after-delay (0s, 5s, 15s, 30s), `AUTO_REFRESH=FALSE`, full nuke +
-  rebuild of the volume + catalog + database with fresh names,
-  `CATALOG='SNOWFLAKE'` (managed) vs `CATALOG='ICEBERG_FILES'` (unmanaged),
-  cross-region US bucket vs same-region EU bucket. The error is identical
-  in every case.
+The actual missing permission is **`storage.buckets.get`** — a
+*bucket-level* permission that `roles/storage.objectAdmin` does **not**
+grant. Snowflake's region-resolution step fails silently when it can't
+read bucket metadata, returns the wrapper "needs to be retried" error,
+and (critically) doesn't log the underlying 403 anywhere visible.
 
-  We confirmed via `SNOWFLAKE.MONITORING.ICEBERG_ACCESS_ERRORS` that
-  Snowflake is **not** logging any cloud-storage error for the failing
-  CREATE — zero rows for `ICEBERG_VOL_FRESH`. So 091369 fires upstream of
-  the GCS call, in Snowflake's internal Iceberg-table provisioning state
-  machine. (For comparison: an earlier attempt against `ICEBERG_TESTBED_VOLUME`
-  did log a real `403 Forbidden: storage.objects.create` from GCS into the
-  same view — that's how we discovered Snowflake needs `objectAdmin` on
-  the bucket even for "read-only" Iceberg tables.)
+**The fix on GCS** is one IAM grant. We chose
+`roles/storage.legacyBucketReader` as the narrowest built-in role
+that adds `storage.buckets.get`:
 
-  Since the error reproduces for **Snowflake-managed Iceberg too**, the
-  blocker is not in our hand-written metadata. With `VERIFY_EXTERNAL_VOLUME`
-  passing and zero cloud-side errors, the next step is a Snowflake support
-  ticket against the account-side Iceberg provisioning pipeline.
-
-## What works for someone with a non-blocked account
-
-If you have a Snowflake account where `CREATE ICEBERG TABLE` succeeds,
-everything is in place to register and probe our fixtures. Run
-`engines/snowflake/_provision.py` first to set up the catalog integration
-+ external volume against the public bucket, then:
-
-```sql
-CREATE OR REPLACE ICEBERG TABLE v2_flat_columns
-  EXTERNAL_VOLUME = 'ICEBERG_TESTBED_VOLUME'
-  CATALOG = 'ICEBERG_FILES'
-  METADATA_FILE_PATH = 'v2_flat_columns/metadata/v1.metadata.json';
-
-SELECT COUNT(*) FROM v2_flat_columns
-  WHERE xmin <= -118 AND xmax >= -125 AND ymin <= 40 AND ymax >= 37;
--- expect 196 rows. Compare query profile's partitions_scanned to confirm
--- file-level pruning to 1/10 files.
+```bash
+gsutil iam ch \
+  serviceAccount:<SNOWFLAKE_GCP_SA>:legacyBucketReader \
+  gs://<your-bucket>/
 ```
 
-## Files in this directory
+You can find `<SNOWFLAKE_GCP_SA>` in the `DESC EXTERNAL VOLUME` output
+under `STORAGE_GCP_SERVICE_ACCOUNT`. The SA name has the form
+`<random>@gcpeuropewest2-1-<id>.iam.gserviceaccount.com` (or the
+equivalent for your region). Custom roles with just the five permissions
+listed in Snowflake's docs are equivalently safe and tighter; the
+legacy role is just lower-friction.
 
-- `_creds.py` — credentials loader with two backends: a 3-line text file at
-  `~/.config/iceberg-geo-testbed/snowflake.txt` (URL / user / password)
-  for personal accounts, or the CARTO `carto-dev-database-credentials`
-  gcloud secret. Picks file backend first if the file exists.
-- `_discover.py` — read-only one-shot discovery probe: account info,
-  available roles, existing iceberg infra, privilege probe.
-- `_provision.py` — idempotent setup: catalog integration + external volume
-  pointing at the public testbed bucket + `ICEBERG_TESTBED` database.
+Confirmed by Snowflake Support in May 2026. Snowflake's
+`SYSTEM$VERIFY_EXTERNAL_VOLUME` ideally would test this too, but
+doesn't yet — worth a feedback request to them.
 
-`run.py` (TODO) — once the 091369 blocker is resolved on a working account,
-pattern after `engines/bigquery/run.py`: register all three fixtures, run
-probes, report the L0–L4 ladder per fixture.
+## Test results
+
+After the IAM fix, all three V2 fixtures register and query correctly:
+
+| Fixture | Level | Notes |
+|---|---|---|
+| `v2_flat_columns` | **L3** | `bytes_scanned=0` because Snowflake answers `COUNT(*) WHERE bbox-predicate` from manifest `record_count` |
+| `v2_bbox_struct`  | **L3** | Predicate syntax for struct fields: `bbox:xmin::FLOAT <= ...` (Snowflake variant-access notation, vs. dot notation in other engines) |
+| `v2_geo_convention` | **L3** | The GeoIceberg V2 spec reference impl works end-to-end on Snowflake |
+| `v3_geometry` | **L0** | `Iceberg table 'V3_GEOMETRY' is V3 but is in an incomplete state. Please complete the upgrade before creating an iceberg table.` |
+
+## The V3 "incomplete state" finding
+
+Our V3 metadata.json claims `format-version: 3`, includes the V3-required
+fields (`next-row-id`, `last-row-id`, `row-lineage`), and uses the V3
+`geometry(OGC:CRS84)` column type. Polaris (the reference Iceberg REST
+catalog) registers it cleanly; Iceberg-Spark accepts the metadata
+structure too.
+
+Snowflake's V3 reader is stricter. The "incomplete state" error
+appears to be Snowflake detecting that our **manifest avro** is V2
+format (pyiceberg 0.11.1 hardcodes `format_version=2` in
+`write_manifest()` — it doesn't yet write V3-format manifest avros)
+while the metadata.json claims V3. Snowflake interprets this as a
+half-completed V2→V3 upgrade and refuses.
+
+This is consistent with the broader pyiceberg state: per
+[iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818),
+V3 *read* support landed in 0.11 but V3 *write* support (including
+manifest avro format) is incomplete. Until pyiceberg ships V3 manifest
+writing — or we hand-write V3 manifest avros ourselves — Snowflake's
+V3 path stays blocked for us.
+
+This is a meaningful finding for Snowflake's claimed `full` V3 geometry
+support per icebergmatrix.org: their reader expects strict V3 manifests,
+and writers in the ecosystem don't yet produce them. Verifying their
+spatial-pruning behavior requires getting past this manifest-format
+strictness first.
+
+## Files
+
+- `_creds.py` — credentials loader (file backend at
+  `~/.config/iceberg-geo-testbed/snowflake.txt` or gcloud secret backend).
+- `_discover.py` — read-only state probe (account info, roles,
+  external volumes, catalog integrations, privilege probe).
+- `_provision.py` — idempotent setup: external volume +
+  `CATALOG INTEGRATION ICEBERG_CAT_FRESH` + database `TESTBED`. Reusable.
+- `run.py` — full L0–L4 probe against all four fixtures.
+
+## Reproducing
+
+```bash
+# One-time wallet/creds setup — see _creds.py for the file format
+mkdir -p ~/.config/iceberg-geo-testbed
+cat > ~/.config/iceberg-geo-testbed/snowflake.txt <<EOF
+https://<account>.snowflakecomputing.com/console/login
+<USERNAME>
+<password>
+EOF
+chmod 600 ~/.config/iceberg-geo-testbed/snowflake.txt
+
+# Provision the external volume + catalog integration + database
+python engines/snowflake/_provision.py
+
+# IAM: grant storage.buckets.get on the bucket — see _provision.py output
+# for the storage_gcp_service_account name to grant
+gsutil iam ch serviceAccount:<SA>:legacyBucketReader gs://<bucket>/
+
+# Run the probe
+python engines/snowflake/run.py
+```
