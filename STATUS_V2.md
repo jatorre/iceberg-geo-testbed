@@ -1,15 +1,20 @@
 # GeoIceberg V2 — engine support status
 
-**Last verified: 2026-05-26.** Living document; PRs welcome.
+**Last verified: 2026-05-28.** Living document; PRs welcome.
 
-This table tracks each engine's implementation status against the
-capabilities defined in [SPEC.md](./SPEC.md) — the V2-era convention
-that delivers file-level spatial pruning today using flat bbox columns
-+ a WKB column.
+Part of the **geo track** (see [STATUS_V3.md](./STATUS_V3.md) and
+[SPEC.md](./SPEC.md)). This table tracks each engine's implementation status
+against the capabilities defined in [SPEC.md](./SPEC.md) — the V2-era convention
+that delivers file-level spatial pruning today using flat bbox columns + a WKB
+column.
 
-Companion file: **[STATUS_V3.md](./STATUS_V3.md)** tracks engine
-support for *Iceberg V3 native* geometry/geography types — the
-eventual target this convention bridges to.
+Companion files:
+- **[STATUS_V3.md](./STATUS_V3.md)** — Iceberg V3 native geometry/geography
+  support (the eventual target this convention bridges to).
+- **[STATUS_CATALOG.md](./STATUS_CATALOG.md)** — the *catalog track*: how engines
+  reach an Iceberg table (catalog/auth/storage plumbing), independent of geo.
+  The "catalog-only" notes and the federation/static-catalog detail referenced
+  in the R1 column below are covered in depth there.
 
 The README's L0–L4 matrix measures end-to-end query behavior across
 fixtures; this document measures each *individual capability* the V2
@@ -142,3 +147,8 @@ change.
   all three V2 fixtures register cleanly and hit L3 file pruning
   (Snowflake actually answers `COUNT(*)` queries from manifest
   `record_count` alone — even stronger than file pruning).
+- **2026-05-28** — Repo split into two tracks; catalog/auth/storage
+  interop findings (Snowflake federation, Databricks `gcs://` scheme,
+  the static-catalog + CDN/Worker work) moved to the new
+  [STATUS_CATALOG.md](./STATUS_CATALOG.md). This file stays focused on the
+  V2 geo convention's capabilities.

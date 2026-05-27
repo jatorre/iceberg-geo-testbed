@@ -1,0 +1,8 @@
+name = "portolan-irc-proxy"
+main = "src/worker.js"
+compatibility_date = "2026-02-01"
+
+# A single, stateless, multi-tenant proxy for Portolan static IRC catalogs.
+# Deploy:  wrangler deploy   (from this directory)
+# Use:     CATALOG_URI = https://portolan-irc-proxy.<subdomain>.workers.dev/s3/<region>/<bucket>/<prefix>
+#                    or  https://portolan-irc-proxy.<subdomain>.workers.dev/gcs/<bucket>/<prefix>

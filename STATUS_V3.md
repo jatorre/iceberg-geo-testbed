@@ -1,16 +1,20 @@
 # Iceberg V3 native geometry — engine support status
 
-**Last verified: 2026-05-26.** Living document; PRs welcome.
+**Last verified: 2026-05-28.** Living document; PRs welcome.
 
-This table tracks each engine's implementation status against the
-native V3 geometry/geography types defined in the
+Part of the **geo track**. This table tracks each engine's implementation status
+against the native V3 geometry/geography types defined in the
 [Apache Iceberg spec](https://iceberg.apache.org/spec/#geometry).
 
-Companion file: **[STATUS_V2.md](./STATUS_V2.md)** tracks the
-*GeoIceberg V2 convention* — the workaround that delivers file-level
-spatial pruning on engines that don't yet support V3 native geometry.
-That convention is the recommended migration path while this table
-remains mostly red.
+Companion files:
+- **[STATUS_V2.md](./STATUS_V2.md)** — the *GeoIceberg V2 convention*, the
+  workaround that delivers file-level spatial pruning on engines that don't yet
+  support V3 native geometry. The recommended migration path while this table
+  stays mostly red.
+- **[STATUS_CATALOG.md](./STATUS_CATALOG.md)** — the *catalog track*: how engines
+  reach a table (catalog/auth/storage), independent of geo. The REST-catalog
+  attach mechanics referenced below (DuckDB↔Horizon, etc.) are part of that
+  story.
 
 ## The reference catalog
 
@@ -304,3 +308,6 @@ to the changelog.
   on the unmanaged read path — almost certainly because our parquet
   data files lack the physical row-lineage metadata columns
   Snowflake's V3 reader requires.
+- **2026-05-28** — Repo split into geo / catalog tracks; catalog-access
+  and REST-catalog interop detail consolidated in
+  [STATUS_CATALOG.md](./STATUS_CATALOG.md). No V3-geometry cell changes.

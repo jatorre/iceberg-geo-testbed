@@ -25,23 +25,27 @@ The key words **MUST**, **SHOULD**, **MAY** are used per
 
 Iceberg V3 (mid-2025) introduced native `geometry`/`geography` types
 with per-file bounds in the manifest, promising file-level pruning for
-spatial predicates. As of mid-2026 this support is **not yet usable
-end-to-end across any engine** we have tested:
+spatial predicates. As of mid-2026, **no engine reads a *portable,
+externally-written* V3 geometry table end-to-end.** The one exception is
+Snowflake, which delivers V3 geometry fully — but only for tables it
+*manages itself*; it can't yet read an externally-produced V3 table.
+Everyone else rejects the type at parse, or (DuckDB) reads the column but
+can't prune on it. See **[STATUS_V3.md](./STATUS_V3.md)** for the live
+per-engine detail. In summary:
 
-- **DuckDB 1.5.3**: parses the type token; `IcebergValue::DeserializeValue`
-  has no `GEOMETRY` branch (manifest-bound deserialization fails on the
-  first spatial predicate); `BLOB → GEOMETRY` cast missing on `SELECT geom`.
-- **BigQuery / BigLake**: `Unknown Iceberg type "geometry(OGC:CRS84)"`
-  rejection at `CREATE EXTERNAL TABLE`.
-- **Sedona / Iceberg-Spark 1.7.1**: `Cannot parse type string to primitive`
-  rejection at metadata parse; the official Iceberg-Spark writer also
-  cannot **write** V3 geometry (UDT mapper missing).
-- **Databricks DBSQL 2026.10**: `[UNSUPPORTED_DATATYPE]` at parser level
-  for both `GEOMETRY` and `GEOGRAPHY`.
-- **Snowflake**: claims V3 geometry support in public preview but
-  blocked by an account-side bug for our testing.
-- **Oracle ADB 26ai**: rejects pyiceberg-emitted manifests at parser
-  layer, separate concern.
+- **DuckDB 1.5.3**: reads typed geometry fine (once the parquet uses
+  GeoParquet-2.0 native typing), but `IcebergValue::DeserializeValue` has
+  no `GEOMETRY` branch, so the first spatial predicate's manifest-bound
+  pruning fails ([duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)).
+- **BigQuery / Sedona**: reject the `geometry(...)` type token at parse.
+  Sedona's Iceberg-Spark also can't **write** V3 geometry (UDT mapper missing).
+- **Databricks DBSQL 2026.10**: `GEOMETRY(SRID)`/`GEOGRAPHY(SRID)` work in
+  *Delta* but its Iceberg-compat writer rejects them — geo doesn't cross
+  the Delta→Iceberg boundary yet.
+- **Snowflake**: V3 geometry works end-to-end for **managed** tables
+  (`ICEBERG_VERSION=3`); the **unmanaged** external read is not yet functional.
+- **Oracle ADB 26ai**: can't read our Iceberg tables at all — a reader-side
+  failure independent of format version or storage (see STATUS_CATALOG.md).
 
 The historical parallel is exactly **GeoParquet 1.1**: it emerged
 because Parquet didn't yet have native geometry types, defining a
@@ -217,9 +221,11 @@ For best performance, writers **SHOULD**:
   GeoParquet 1.1 inside each file extends pruning to the row-group
   level after file pruning has selected the surviving files.
 - **Populate per-file column statistics** (`column_sizes`,
-  `value_counts`, `null_value_counts`). Standard Iceberg writers do
-  this automatically; some readers (e.g. Oracle ADB) reject manifests
-  that omit them.
+  `value_counts`, `null_value_counts`). Standard Iceberg writers do this
+  automatically and it's good hygiene. (We initially suspected Oracle ADB
+  *required* these to read a table; testing disproved that — Oracle's
+  rejection is reader-side and independent of these metrics. See
+  [STATUS_CATALOG.md](./STATUS_CATALOG.md).)
 
 ---
 
