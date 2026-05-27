@@ -1,6 +1,6 @@
 # Geo on Iceberg, today: a V2 convention while V3 catches up
 
-*2026-05-26*
+*2026-05-27*
 
 ## The premise
 
@@ -16,10 +16,16 @@ to verify the promise — one repository where each major engine could
 be probed against the same hand-written V2 / V3 fixtures, and the
 results aggregated into a single matrix.
 
-The headline finding: **no engine we tested supports V3 geometry
-end-to-end as of mid-2026.** The closest is DuckDB, which parses the
-type token but errors as soon as you read the column. Every other
-engine rejects the type either at metadata parse or at SQL parse.
+The headline finding: **only Snowflake delivers V3 geometry end-to-end
+— and only for tables it manages itself.** Every other engine sits
+somewhere between "rejects the type outright" (BigQuery, Sedona,
+Databricks, Oracle) and "reads the column but can't prune on it"
+(DuckDB, at L2). And crucially, *no* engine — Snowflake included — can
+yet read a **portable, externally-written** V3 geometry table. The V3
+support that exists is each vendor reading its own managed output.
+
+So if you want geospatial data on Iceberg that *any* engine can query
+today, V3 isn't the answer yet.
 
 That left an open question: *what should you actually do today if you
 have geospatial data and want fast Iceberg queries?*
@@ -56,54 +62,104 @@ Each fixture was probed across six engines:
 
 | Engine | V2 flat | V2 struct | V3 geometry |
 |---|---|---|---|
-| DuckDB 1.5.3 | **L3** | L2 (no pruning) | **L0** — type parses; `SELECT geom` errors with `BLOB→GEOMETRY` cast missing, bound deserializer missing |
+| DuckDB 1.5.3 | **L3** | L2 (no struct pruning) | **L2** — type parses, `ST_AsText(geom)` returns clean WKT; manifest bound deserializer has no GEOMETRY branch, so `ST_Intersects` crashes and L3 pruning is blocked ([#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)) |
 | BigQuery / BigLake | **L3** | **L3** | **L0** — `Unknown Iceberg type "geometry(OGC:CRS84)"` |
+| Snowflake (GA May 2026) | **L3** | **L3** | **L3 (managed)** — the only engine where V3 geometry delivers end-to-end: spatial predicate correct *and* manifest geometry-bound pruning fires. But only for Snowflake-managed tables; its V3 *unmanaged* (external-metadata) read is still broadly non-functional |
 | Sedona / Iceberg-Spark 1.7.1 | **L3** | **L3** | **L0** — type rejected at parse + UDT writer missing |
-| Snowflake | blocked | blocked | blocked | (account-side bug, support ticket pending) |
-| Databricks (DBSQL 2026.10) | n/a here* | n/a* | **L0** — `[UNSUPPORTED_DATATYPE]` |
-| Oracle ADB 26ai | L0** | L0** | L0** | (\**rejects pyiceberg-emitted manifests at parser layer) |
+| Databricks (DBSQL 2026.10) | **L2** via Snowflake federation* | **L2** via federation* | **L0** — `GEOMETRY(SRID)`/`GEOGRAPHY(SRID)` work in **Delta**, but the Iceberg-compat writer (`IcebergWriterCompatV1`/`V3`) rejects them; geo-in-Iceberg likely coming soon |
+| Oracle ADB 26ai | **L0** | **L0** | **L0** — `ORA-20000: Failed to generate column list`; fails regardless of storage, auth, producer, or metrics (see below) |
 
-\* Databricks fully supports V2 reads via Unity Catalog, Glue, HMS, or
-Snowflake Horizon — but has no generic Iceberg REST consumer and no
-"static metadata.json on a bucket" path. Our public-bucket testbed
-just doesn't slot into Databricks's catalog-mediated reader. Per
-icebergmatrix.org confirmed.
+\* Databricks has no generic Iceberg-REST consumer and no
+"static metadata.json on a bucket" path — only named catalogs
+(Glue / HMS / Snowflake Horizon / Unity) can back a foreign Iceberg
+table. We reached our V2 data by federating a Snowflake-managed copy
+via `CREATE CONNECTION TYPE snowflake` (query federation; the
+direct-from-storage read is blocked separately — see below).
 
-## The interesting findings beyond "V3 doesn't work"
+## The interesting findings beyond "V3 isn't ready"
+
+**Snowflake's managed V3 geometry actually works — proof the
+architecture is sound.** A Snowflake-managed `GEOMETRY` table
+(`ICEBERG_VERSION=3` is required; the default is V2, and the error if
+you forget doesn't hint at it) returns correct spatial-predicate results
+*and* prunes on the manifest's geometry bounds (`bytes_scanned=0` on the
+spatial query). So per-file geometry bounds aren't vaporware — when an
+engine writes and reads its own V3, the promise holds. The catch is the
+word "own": Snowflake can't yet read an externally-written V3 table, and
+neither can anyone else.
+
+**V3 geometry needs GeoParquet-2.0-style native typing in the data
+files — plain WKB-in-`BINARY` isn't enough.** We learned this the hard
+way: DuckDB jumped from L0 to L2 the moment we wrote the geometry column
+with a native Parquet `Geometry` logical type (via geoarrow-pyarrow)
+instead of a plain `BINARY` column. Iceberg V3 geometry maps to the
+Parquet native Geometry logical type that GeoParquet 2.0 standardizes —
+an engine won't recognize a `BINARY` column as geometry no matter what
+the Iceberg schema claims.
+
+**DuckDB is L2 — not the `full` the matrix claims, but not broken
+either.** [icebergmatrix.org](https://icebergmatrix.org) lists DuckDB V3
+geometry as `full`. Hands-on: the type parses, and `SELECT geom` /
+`ST_AsText(geom)` return clean geometries — but a spatial *predicate*
+trips a manifest bound deserializer that has no `GEOMETRY` branch and
+crashes. One well-isolated gap between L2 and L3 pruning. We filed it as
+[duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002);
+the maintainer confirmed manifest bounds-stats handling is the remaining
+piece.
 
 **V2 struct-field pruning is engine-dependent.** DuckDB reads the
 `bbox.xmin` predicate but doesn't push it to manifest bounds — all 10
-files scanned. BigQuery and Sedona prune the same predicate to 1
-file. So "GeoParquet-1.1-style bbox struct" is *not* a portable
-pruning strategy for Iceberg. The flat-column version is.
+files scanned. BigQuery and Sedona prune the same predicate to 1 file.
+So a "GeoParquet-1.1-style bbox struct" is *not* a portable pruning
+strategy for Iceberg; flat top-level bbox columns are.
 
-**Our hand-written V2 metadata is fully spec-compliant.** We deployed
-Apache Polaris (the reference Iceberg REST catalog) on a small GCE VM
-and registered all fixtures against it. Polaris accepted V2 fixtures
-cleanly. (V3 initially failed with `Cannot parse missing long:
-next-row-id` — a pyiceberg 0.11.1 gap that we patched in our static
-catalog writer.) **Oracle's rejection isn't about our metadata; it's
-that Oracle's reader is stricter than the spec.**
+**Our metadata is spec-compliant by the reference catalog.** Apache
+Polaris (the reference open-source Iceberg REST catalog) accepts all our
+V2 fixtures, and our V3 too after we patched a real pyiceberg gap it
+caught (`next-row-id` / `row-lineage`). So whenever an engine rejects our
+tables, it's the engine being stricter than the spec — not us.
 
-**DuckDB's V3 support claim is overstated.** The
-[icebergmatrix.org](https://icebergmatrix.org) compatibility matrix
-shows DuckDB V3 geometry as `full`. Our hands-on found it's L0 — the
-type token is recognized but two distinct gaps (manifest-bound
-deserializer + parquet BLOB→GEOMETRY cast) block actual reads. Filed
-back as [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002).
+**Databricks has two separate Iceberg gaps, both worth knowing.**
+(1) Geo types *exist* — `GEOMETRY(SRID)` / `GEOGRAPHY(SRID)` are valid
+**Delta** column types — but the Iceberg-compat writer rejects them
+(`DELTA_ICEBERG_WRITER_COMPAT_VIOLATION`). That error name is the tell:
+Databricks "Iceberg" is Delta plus an Iceberg-compat writer, so geo stops
+at that boundary. Likely coming soon. (2) Structurally, Databricks has
+**no generic Iceberg-REST consumer** — `CREATE CONNECTION TYPE iceberg`
+errors `CONNECTION_TYPE_NOT_SUPPORTED`; only Glue, HMS, Snowflake Horizon,
+and Unity-to-Unity can back a foreign Iceberg table. Its `full`
+REST-catalog claim is the *serve* side (Unity hosting the REST API), not
+the consume side — so you can't point it at a self-hosted
+Polaris/Nessie/Lakekeeper even once geo lands. We *did* reach our V2 data
+by federating a Snowflake-managed copy (query federation via
+`TYPE snowflake`); the direct-from-storage read fell back to JDBC because
+Databricks rejects Snowflake-on-GCP's `gcs://` metadata scheme (it takes
+`gs://`, not `gcs://`).
 
-**Databricks has explicit, intentional gaps in Iceberg interop.**
-Their Lakehouse Federation supports Unity Catalog, AWS Glue, HMS, and
-Snowflake Horizon as Iceberg sources. No generic Iceberg REST. No
-static metadata.json. No Polaris. The `CREATE CONNECTION TYPE iceberg`
-literally errors with `CONNECTION_TYPE_NOT_SUPPORTED`. Their `full`
-REST catalog support claim is the *serve* side (Unity Catalog hosting
-the REST API), not the consume side.
+**Oracle's wall is its Iceberg reader itself — not our metadata, not
+storage.** Oracle ADB rejects the table with `ORA-20000: Failed to
+generate column list`. We chased it hard and ruled out every external
+variable: adding the optional manifest metrics didn't help; **Snowflake's
+own Spark-lineage metadata fails identically**; and after staging the
+same fixture to **S3 with a working IAM credential** (Oracle's
+`LIST_OBJECTS` succeeded), the Iceberg read *still* failed the same way.
+So it's neither storage (GCS vs S3) nor producer nor auth — it's Oracle's
+direct-`metadata.json` Iceberg path. Oracle isn't in icebergmatrix.org;
+this may be the first cross-engine documentation of the behavior.
 
-**Oracle ADB isn't in icebergmatrix.org at all.** Their reader is
-strict enough to reject pyiceberg-emitted manifests that every other
-engine accepts. We may have written the first cross-engine
-documentation of that behavior.
+**The deeper lesson: interop is governed by storage × catalog × auth,
+not just engine × format.** Whether a read works *at all* turned out to
+depend on three orthogonal axes as much as the format version:
+**storage backend** (S3 is first-class; GCS is second-class in several
+engines — Databricks's direct read even rejects the `gcs://` scheme),
+**catalog mechanism** (static `metadata.json` vs generic Iceberg REST vs
+named catalogs — engines support wildly different subsets), and **auth
+mode** (public, credential-vended, keyed-vs-keyless, and long-lived-vs-
+temporary — Oracle's S3 credential rejects temporary STS session tokens
+outright). A corollary that bites everyone: many connectors have no
+first-class anonymous path, so you must hand them an *empty* credential
+just to read a public bucket. "Snowflake-on-GCS" and "Snowflake-on-AWS"
+are genuinely different cells.
 
 ## The historical parallel: GeoParquet 1.1
 
@@ -202,9 +258,21 @@ If you're choosing a format today, the testbed results are clear:
 - **V2 with the GeoParquet-style bbox struct**: works for reads, but
   pruning is engine-dependent (DuckDB doesn't, BigQuery and Sedona
   do). Avoid for cross-engine portability.
-- **V3 native geometry**: not viable on any engine end-to-end yet.
-  Track the [DuckDB issue we filed](https://github.com/duckdb/duckdb-iceberg/issues/1002)
-  and Snowflake's preview as the leading indicators.
+- **V3 native geometry**: viable **only inside a single managed platform
+  today**. Snowflake-managed V3 works end-to-end, but no engine can read
+  another engine's externally-written V3 yet — so it's not a portable
+  choice. If you're all-in on one vendor that supports it, use it; if you
+  need cross-engine reads, V2 is still the answer. And remember V3 data
+  files need native Parquet geometry typing (GeoParquet 2.0), not plain
+  `BINARY`. Track the
+  [DuckDB issue we filed](https://github.com/duckdb/duckdb-iceberg/issues/1002)
+  and per-engine V3 progress as the leading indicators.
+
+And don't reason about the format in isolation: **where you host it
+(S3 vs GCS), how the table is announced (static `metadata.json` vs a
+catalog), and the auth mode all gate which engines can read it** — often
+more decisively than the format version. (S3 + a named catalog is the
+widest-compatibility combination today.)
 
 The repo's matrix is kept up to date — re-run the engine probes
 whenever you want a fresh reading.
