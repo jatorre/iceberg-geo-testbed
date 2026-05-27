@@ -178,9 +178,49 @@ SELECT ST_AsText(geom) FROM cat.v3.v3_geometry LIMIT 1;  -- typed POINT
 Verified: DuckDB discovers all 5 tables across both namespaces and reads V2
 (bbox pruning, WKB) and V3 (native geometry) through the catalog. This proves
 generic IRC consumption works against an arbitrary, uncertified, serverless
-endpoint — the open path that the big managed-warehouse federation features
-(Databricks, and Glue's federation) don't take. `AUTHORIZATION_TYPE 'none'` is
-needed because a static catalog has no OAuth token endpoint.
+endpoint. `AUTHORIZATION_TYPE 'none'` is needed because a static catalog has no
+OAuth token endpoint.
+
+The same catalog is published on **GCS** (`…/cartobq-iceberg-geo-testbed/catalog`)
+and **S3** (`carto-iceberg-geo-testbed-public`), public, via
+`python -m testbed.static_rest_catalog --target={gcs|s3|s3native} --publish`.
+
+#### Who can actually consume it (2026-05-27)
+
+| Client | Direct (raw object storage) | Via permissive CDN front |
+|---|---|---|
+| **DuckDB / Trino / Spark / pyiceberg** | ✅ — unauthenticated IRC (`AUTHORIZATION_TYPE 'none'`) | n/a (not needed) |
+| **Snowflake** | ❌ — `ICEBERG_REST` mandates `REST_AUTHENTICATION`; a dummy token is rejected by the object store (S3 `400 Unsupported Authorization Type`; GCS `401 AuthenticationRequired`) | ✅ **end-to-end** (see recipe below) |
+| **Oracle ADB** | ❌ — `MOUNT_ICEBERG` requires a real `oauth2`/`aws_role_arn`/`secret_id` credential (no dummy) + a partner catalog type | ❌ (can't even mint a dummy credential) |
+
+The dividing line: **clients that do unauthenticated IRC consume the pure-static
+catalog directly; the managed warehouses mandate auth that raw object storage
+rejects.** A pure-static catalog can't satisfy them — but a **permissive CDN
+front** (config-only, still serverless) that ignores the `Authorization` header
+bridges the gap.
+
+#### Recipe: Snowflake consuming the static catalog via a CDN front
+
+The warehouse blocker isn't secrecy — it's a protocol mismatch (Snowflake speaks
+`BEARER`/`OAUTH`/`SigV4-for-AWS-services`; raw S3/GCS speak SigV4-for-s3 /
+GCS-OAuth / anonymous). A CDN that drops `Authorization` resolves it:
+
+1. Publish the catalog to S3 with `s3://` data paths (`--target=s3native`).
+2. Put **CloudFront** in front with the managed *CachingOptimized* policy (it
+   doesn't forward `Authorization`, so the mandatory-but-dummy bearer is absorbed
+   and the cached public object is served). Config-only — no server.
+3. Snowflake `CREATE CATALOG INTEGRATION … CATALOG_SOURCE=ICEBERG_REST
+   CATALOG_API_TYPE=PUBLIC REST_AUTHENTICATION=(TYPE=BEARER BEARER_TOKEN='x')`
+   pointed at the CloudFront base URI.
+4. Data via `CREATE EXTERNAL VOLUME … ALLOW_WRITES=FALSE` + a scoped read-only
+   IAM role (read-only mode skips Snowflake's write-test).
+5. `CREATE ICEBERG TABLE … CATALOG=<int> EXTERNAL_VOLUME=<vol>
+   CATALOG_NAMESPACE='v2' CATALOG_TABLE_NAME='v2_flat_columns'` → `SELECT` works
+   (verified: `COUNT(*)=10000`, bbox predicate `=196`).
+
+So **static catalog + a permissive CDN front is consumable by a managed
+warehouse** — the catalog stays static files; the CDN absorbs the auth
+requirement the warehouse insists on.
 
 ---
 

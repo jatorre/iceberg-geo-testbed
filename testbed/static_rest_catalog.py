@@ -46,10 +46,51 @@ from . import (
     v3_geometry_lineage,
 )
 
-BUCKET = "cartobq-iceberg-geo-testbed"
-CATALOG_PREFIX = "catalog"  # everything lives under gs://<bucket>/catalog/
 IRC_PREFIX = "geo"  # the {prefix} path segment in /v1/{prefix}/...
-BASE_URI = f"https://storage.googleapis.com/{BUCKET}/{CATALOG_PREFIX}"
+
+# Publish targets — same catalog, different storage backend / auth posture.
+TARGETS = {
+    "gcs": dict(
+        storage="gcs",
+        bucket="cartobq-iceberg-geo-testbed",
+        prefix="catalog",
+        region="us",
+        base_uri="https://storage.googleapis.com/cartobq-iceberg-geo-testbed/catalog",
+    ),
+    "s3": dict(
+        storage="s3",
+        bucket="carto-iceberg-geo-testbed-public",
+        prefix="catalog",
+        region="us-east-1",
+        base_uri="https://carto-iceberg-geo-testbed-public.s3.us-east-1.amazonaws.com/catalog",
+    ),
+    # s3:// data paths — for warehouse consumers (Snowflake) that map data
+    # files to an external volume by the s3:// scheme. Catalog endpoints are
+    # still served over HTTPS (e.g. via the CloudFront front); only the
+    # embedded data paths differ.
+    "s3native": dict(
+        storage="s3",
+        bucket="carto-iceberg-geo-testbed-public",
+        prefix="catalog",
+        region="us-east-1",
+        base_uri="s3://carto-iceberg-geo-testbed-public/catalog",
+    ),
+}
+
+# Active config — overridden by _select_target() from --target (default gcs).
+STORAGE = TARGETS["gcs"]["storage"]
+BUCKET = TARGETS["gcs"]["bucket"]
+CATALOG_PREFIX = TARGETS["gcs"]["prefix"]
+REGION = TARGETS["gcs"]["region"]
+BASE_URI = TARGETS["gcs"]["base_uri"]
+
+
+def _select_target(name: str) -> None:
+    global STORAGE, BUCKET, CATALOG_PREFIX, REGION, BASE_URI
+    t = TARGETS[name]
+    STORAGE, BUCKET, CATALOG_PREFIX, REGION, BASE_URI = (
+        t["storage"], t["bucket"], t["prefix"], t["region"], t["base_uri"]
+    )
 
 # namespace -> list of (table_name, fixture_module)
 NAMESPACES: dict[str, list] = {
@@ -196,20 +237,40 @@ def publish(surface: dict[str, str]) -> None:
         for key in sorted(surface):
             tmpf = Path(tmp) / "obj.json"
             tmpf.write_text(surface[key])
-            remote = f"gs://{BUCKET}/{CATALOG_PREFIX}/{key}"
-            subprocess.run(
-                ["gsutil", "-h", "Content-Type:application/json", "cp", str(tmpf), remote],
-                check=True,
-            )
-    # Data layer: rsync the whole data/ tree.
+            key_path = f"{CATALOG_PREFIX}/{key}"
+            if STORAGE == "gcs":
+                subprocess.run(
+                    ["gsutil", "-h", "Content-Type:application/json", "cp",
+                     str(tmpf), f"gs://{BUCKET}/{key_path}"],
+                    check=True,
+                )
+            else:  # s3
+                subprocess.run(
+                    ["aws", "s3", "cp", str(tmpf), f"s3://{BUCKET}/{key_path}",
+                     "--content-type", "application/json", "--region", REGION],
+                    check=True,
+                )
+    # Data layer: sync the whole data/ tree.
     src = STAGING / "data"
-    remote = f"gs://{BUCKET}/{CATALOG_PREFIX}/data/"
-    subprocess.run(["gsutil", "-m", "rsync", "-r", str(src), remote], check=True)
-    print(f"\nPublished. IRC base URI: {BASE_URI}")
+    if STORAGE == "gcs":
+        subprocess.run(
+            ["gsutil", "-m", "rsync", "-r", str(src), f"gs://{BUCKET}/{CATALOG_PREFIX}/data/"],
+            check=True,
+        )
+    else:  # s3
+        subprocess.run(
+            ["aws", "s3", "sync", str(src), f"s3://{BUCKET}/{CATALOG_PREFIX}/data/", "--region", REGION],
+            check=True,
+        )
+    print(f"\nPublished to {STORAGE}. IRC base URI: {BASE_URI}")
     print(f"  config: {BASE_URI}/v1/config")
 
 
 def main() -> int:
+    for arg in sys.argv:
+        if arg.startswith("--target="):
+            _select_target(arg.split("=", 1)[1])
+    print(f"Target: {STORAGE} — base URI {BASE_URI}")
     if STAGING.exists():
         shutil.rmtree(STAGING)
     print("Building data layer (fixtures with catalog URLs)…")
@@ -223,7 +284,7 @@ def main() -> int:
         print(f"  {key}")
 
     if "--publish" in sys.argv:
-        print("\nPublishing to GCS…")
+        print(f"\nPublishing to {STORAGE}…")
         publish(surface)
     else:
         print(f"\n(dry run — re-run with --publish to upload. Base URI: {BASE_URI})")
