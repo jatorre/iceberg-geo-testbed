@@ -125,12 +125,19 @@ tables, it's the engine being stricter than the spec — not us.
 (`DELTA_ICEBERG_WRITER_COMPAT_VIOLATION`). That error name is the tell:
 Databricks "Iceberg" is Delta plus an Iceberg-compat writer, so geo stops
 at that boundary. Likely coming soon. (2) Structurally, Databricks has
-**no generic Iceberg-REST consumer** — `CREATE CONNECTION TYPE iceberg`
-errors `CONNECTION_TYPE_NOT_SUPPORTED`; only Glue, HMS, Snowflake Horizon,
-and Unity-to-Unity can back a foreign Iceberg table. Its `full`
-REST-catalog claim is the *serve* side (Unity hosting the REST API), not
-the consume side — so you can't point it at a self-hosted
-Polaris/Nessie/Lakekeeper even once geo lands. We *did* reach our V2 data
+**no generic Iceberg-REST consumer — by design** — `CREATE CONNECTION
+TYPE iceberg` errors `CONNECTION_TYPE_NOT_SUPPORTED`; only Glue, HMS,
+Snowflake Horizon, and Unity-to-Unity can back a foreign Iceberg table.
+This is a deliberate choice, not a temporary gap: Databricks certifies
+per-partner IRC connectors (its Lakehouse Federation model, the same
+approach Glue / Fabric / BigQuery take) rather than accepting any
+spec-compliant endpoint, and prioritizes new ones by customer demand. So
+conformance to the spec isn't sufficient for access, and you can't point
+it at a self-hosted Polaris/Nessie/Lakekeeper even once geo lands. Its
+`full` REST-catalog claim is the *serve* side (Unity hosting the REST
+API), not the consume side. The reliability rationale is real — this
+testbed shows IRC implementations genuinely diverge — but it leaves the
+open standard practically gated at the connector layer. We *did* reach our V2 data
 by federating a Snowflake-managed copy (query federation via
 `TYPE snowflake`); the direct-from-storage read fell back to JDBC because
 Databricks rejects Snowflake-on-GCP's `gcs://` metadata scheme (it takes

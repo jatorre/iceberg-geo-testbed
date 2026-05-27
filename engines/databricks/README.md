@@ -82,6 +82,34 @@ ICEBERG_REST` both error with `CONNECTION_TYPE_NOT_SUPPORTED`. **But
 of those providers and is reachable. There's still no generic Iceberg
 REST client and no static-`metadata.json` path.
 
+**This is by design, not a temporary gap.** Databricks's stated position
+is that it deliberately does *not* offer a generic Iceberg-REST (IRC)
+connector: because IRC implementations vary in practice, it builds and
+certifies per-partner connectors (the Lakehouse Federation model, also
+how Glue / Fabric / BigQuery operate) rather than accepting any
+spec-compliant endpoint, and prioritizes new endpoints by customer
+demand. So a self-hosted Polaris / Nessie / Lakekeeper / generic-IRC
+catalog is **not expected to become directly federatable** — the
+supported path is to land your tables in one of the certified named
+catalogs (Glue / HMS / Snowflake Horizon / Unity). The reliability
+argument is real (this testbed shows IRC implementations genuinely
+diverge — `gcs://` vs `gs://`, V3 row-lineage, etc.), but it does leave
+the "open standard" practically gated at the connector layer:
+conformance to the spec isn't sufficient for access; a commercial
+certification is.
+
+This is a **managed-warehouse-federation vs query-engine** split, not
+"Databricks is uniquely closed." AWS Glue's catalog federation looks
+similarly partner-gated (its API exposes no generic-IRC connection type;
+documented targets are Snowflake / Databricks / Redshift), so Databricks's
+"same approach as Glue" is defensible. The *generic* IRC-consumer role is
+filled by the query engines and clients: DuckDB, Trino, Spark, pyiceberg —
+and Snowflake's `CATALOG_SOURCE = ICEBERG_REST` integration. We
+demonstrate the open path works by serving our own **fully static,
+serverless IRC catalog** (see the repo README) and reading it with DuckDB
+`ATTACH` — zero certification, an arbitrary endpoint. The standard isn't
+the blocker; the warehouses' federation product choices are.
+
 > *"Iceberg tables in Unity Catalog do not support a LOCATION clause."*
 > — [Databricks docs on Iceberg](https://docs.databricks.com/aws/en/iceberg/)
 
@@ -121,8 +149,9 @@ geo type stops at the Iceberg boundary.
 
 **Roadmap:** geo support in the Iceberg path is *not* there yet as of
 2026-05-26 but is **likely coming soon** — worth re-testing periodically.
-Generic Iceberg-REST-catalog federation (below) has no public answer as
-of 2026-05-26.
+Generic Iceberg-REST-catalog federation is **not supported by design**
+(certified per-partner connectors only — see the headline finding); it
+is not expected to change generically.
 
 ## Matrix row
 
