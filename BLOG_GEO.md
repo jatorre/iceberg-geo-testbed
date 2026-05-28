@@ -30,7 +30,7 @@ We graded each engine on a small ladder:
 | **Snowflake** (GA May 2026) | **L3 — works end-to-end.** Managed and externally-written paths both deliver correct spatial predicates *and* manifest geometry-bound pruning. The clear leader. |
 | **DuckDB 1.5.3** | **L2** — reads correctly; spatial predicates work with [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (in flight). File pruning is the next step. |
 | **Databricks** | **L0** — doesn't yet support V3 geometry in Iceberg (it does in Delta). Likely coming soon. |
-| **BigQuery / BigLake, Sedona + Iceberg-Spark, Dataproc, EMR Serverless** | **L0** — none support V3 *geometry* yet. Per [icebergmatrix.org](https://icebergmatrix.org/), the Spark variants and Databricks already ship other V3 types (Variant, Nanosecond Timestamps), so V3 itself has rolled out — geometry just isn't on the priority list. BigQuery hasn't shipped any V3 type yet. |
+| **BigQuery / BigLake, Sedona + Iceberg-Spark, Dataproc, EMR Serverless** | **L0** — none support V3 *geometry* yet. The three Spark variants share one upstream gap in `iceberg-spark-runtime`; BigQuery rejects the type at table creation. We didn't measure their support for the *other* V3 data types — only geometry. |
 | **Oracle ADB 26ai** | **L0** — Oracle's Iceberg reader can't read any of our Iceberg tables at all (V2 or V3, ours or Snowflake's). Reader-side bug, upstream of the V3 question. |
 
 Detail and per-capability breakdowns live in [`STATUS_V3.md`](./STATUS_V3.md).
@@ -55,15 +55,15 @@ The PR deliberately *skips* decoding the geometry bound, so DuckDB falls back to
 
 ## Brief notes on the rest
 
-**The real signal here isn't "they don't support V3" — it's that they've shipped V3 but de-prioritized geometry.** Per [icebergmatrix.org](https://icebergmatrix.org/), Databricks (DBR 17.3), Dataproc 2.3, EMR, and OSS Spark 4.1 already show `Full` for the V3 Variant type — and several also for Nanosecond Timestamps. So the V3 plumbing landed. The Geometry / Geo Types column is the one that's still `None` or `Unknown` across all of them. Geometry isn't gated on V3 being too new; it's gated on the geospatial parts of V3 not being on anyone's near-term roadmap outside Snowflake and DuckDB.
+**The three Spark variants** (Sedona + Iceberg-Spark, Dataproc Serverless 2.3, EMR Serverless 7.13) fail identically with `UnsupportedOperationException: Cannot convert unknown type to Spark: geometry`. The gap is upstream in `iceberg-spark-runtime` — *one* PR there would move all three. icebergmatrix.org lists "EMR (8.0 Spark): Full" for V3 Geometry, but `emr-8.x` doesn't actually exist yet as a release label (`aws emr list-release-labels` only goes up to `emr-7.13.0`); the latest testable EMR is L0.
 
-Mechanically, the three Spark variants (Sedona + Iceberg-Spark, Dataproc 2.3, EMR Serverless 7.13) fail identically with `UnsupportedOperationException: Cannot convert unknown type to Spark: geometry`. The gap is upstream in `iceberg-spark-runtime`; *one* PR there would move all three. (icebergmatrix.org lists "EMR (8.0 Spark): Full" for V3 Geometry, but `emr-8.x` doesn't actually exist yet as a release label — the latest testable EMR is L0.)
-
-**BigQuery** is the exception in this group: it hasn't shipped any V3 data type yet (None across the row). The V3 geometry rejection at `CREATE EXTERNAL TABLE` is the V2-to-V3 transition not happening here, not a geometry-specific call.
+**BigQuery** rejects the V3 geometry type at `CREATE EXTERNAL TABLE` (`Unknown Iceberg type "geometry(OGC:CRS84)"`). BigQuery happily reads individual V2 Iceberg tables credential-less via per-table `metadata.json` URLs, with file pruning on flat-double columns — V3 geometry is a reader-side change away.
 
 **Databricks** is the most asymmetric case: `GEOMETRY(SRID)` and `GEOGRAPHY(SRID)` already work in *Delta*, but the Iceberg-compat writer rejects them (`DELTA_ICEBERG_WRITER_COMPAT_VIOLATION`). So the geometry types exist on the platform; they just don't cross the Delta→Iceberg boundary yet. **Likely coming soon.**
 
 **Oracle ADB** sits outside this whole conversation — blocked upstream of V3. `DBMS_CLOUD.CREATE_EXTERNAL_TABLE` errors `ORA-20000: Failed to generate column list` on every Iceberg table we've pointed it at — ours, Snowflake's Spark-lineage output, V2, V3, all identical. We've ruled out storage, producer, metrics, and auth. It's the reader, and the V3 question can't even be asked until it can read V2.
+
+A note on scope: we measured *V3 geometry*, not V3 broadly. icebergmatrix.org lists "Full" for the V3 Variant type on several of these engines, which would suggest some V3 plumbing has landed even where geometry hasn't — but we already caught the same matrix overclaiming "Full" for DuckDB V3 Geometry (it's L2 in our hands), so we're not quoting those other "Full" cells as fact without verifying them ourselves. What we *can* say: V3 geometry is the column that doesn't work today on any of these engines.
 
 ---
 
