@@ -29,12 +29,9 @@ We graded each engine on a small ladder:
 |---|---|
 | **Snowflake** (GA May 2026) | **L3 — works end-to-end.** Managed and externally-written paths both deliver correct spatial predicates *and* manifest geometry-bound pruning. The clear leader. |
 | **DuckDB 1.5.3** | **L2** — reads correctly; spatial predicates work with [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (in flight). File pruning is the next step. |
-| **Databricks** | **L0** — Iceberg-compat writer rejects `GEOMETRY` (the type works in Delta). Geo-in-Iceberg is **likely coming soon**; not available today. |
-| **BigQuery / BigLake** | **L0** — `Unknown Iceberg type "geometry(OGC:CRS84)"` at `CREATE EXTERNAL TABLE`. |
-| **Sedona + Iceberg-Spark 1.7.1** | **L0** — type rejected at parse. Iceberg-Spark's writer also can't yet *write* V3 geometry (UDT mapper missing). |
-| **Dataproc Serverless 2.3** (Spark 3.5.3) | **L0** — bundled `iceberg-spark-runtime` errors `Cannot convert unknown type to Spark: geometry`. Same upstream Spark gap as Sedona. |
-| **EMR Serverless 7.13** (Spark 3.5.6-amzn-2) | **L0** — same error verbatim. icebergmatrix.org lists "EMR (8.0 Spark): Full" but `emr-8.x` doesn't exist yet as a release label; the latest *available* EMR is L0. |
-| **Oracle ADB 26ai** | **L0** — Oracle's Iceberg reader can't read any of our Iceberg tables (V2 or V3, including ones written by Snowflake's Spark-lineage writer). Reader-side bug. |
+| **Databricks** | **L0** — doesn't yet support V3 geometry in Iceberg (it does in Delta). Likely coming soon. |
+| **BigQuery / BigLake, Sedona + Iceberg-Spark, Dataproc, EMR Serverless** | **L0** — none support V3 data types yet. The three Spark variants share one upstream gap in `iceberg-spark-runtime` (no V3 geometry mapper); BigQuery rejects the type at table creation. |
+| **Oracle ADB 26ai** | **L0** — Oracle's Iceberg reader can't read any of our Iceberg tables at all (V2 or V3, ours or Snowflake's). Reader-side bug, upstream of the V3 question. |
 
 Detail and per-capability breakdowns live in [`STATUS_V3.md`](./STATUS_V3.md).
 
@@ -58,13 +55,11 @@ The PR deliberately *skips* decoding the geometry bound, so DuckDB falls back to
 
 ## Brief notes on the rest
 
-**Databricks** — likely coming soon. Their Iceberg story is built on Delta + an Iceberg-compat writer; `GEOMETRY(SRID)` and `GEOGRAPHY(SRID)` work fine in Delta, but the Iceberg-compat writer rejects them today (`DELTA_ICEBERG_WRITER_COMPAT_VIOLATION`). Geo in Iceberg is **likely coming soon**, but it's not available today; re-test periodically.
+**BigQuery, Sedona + Iceberg-Spark, Dataproc, EMR** — **none support V3 data types yet.** BigQuery rejects the V3 geometry type at table creation; the three Spark variants share one upstream gap (`iceberg-spark-runtime` doesn't yet map V3 types to Spark types, so they all fail identically with `Cannot convert unknown type to Spark: geometry`). For BigQuery this is the V2-to-V3 transition that hasn't shipped; for the Spark world, *one* upstream PR would move all three at once. icebergmatrix.org lists "EMR (8.0 Spark): Full" for V3 Geometry, but `emr-8.x` doesn't exist yet as a release label — the latest testable EMR is L0.
 
-**BigQuery / BigLake** — rejects the type at `CREATE EXTERNAL TABLE` (`Unknown Iceberg type "geometry(OGC:CRS84)"`). BigQuery happily reads individual V2 Iceberg tables credential-less via per-table `metadata.json` URLs, with file pruning on flat-double columns — but V3 geometry is a reader-side change away.
+**Databricks** — also L0 today, and the most asymmetric case: `GEOMETRY(SRID)` and `GEOGRAPHY(SRID)` already work in *Delta*, but the Iceberg-compat writer rejects them (`DELTA_ICEBERG_WRITER_COMPAT_VIOLATION`). So the geometry types exist on the platform; they just don't cross the Delta→Iceberg boundary yet. **Likely coming soon.**
 
-**Sedona + Iceberg-Spark, Dataproc, EMR** — three independent Spark variants, all L0 on V3 geometry with the same root cause: the upstream `iceberg-spark-runtime` can't map the V3 geometry type to a Spark type (`UnsupportedOperationException: Cannot convert unknown type to Spark: geometry`). icebergmatrix.org lists "EMR (8.0 Spark): Full" but `emr-8.x` doesn't actually exist as a release label yet, and the latest testable EMR is L0. Sedona+Iceberg-Spark also can't *write* V3 geometry (UDT mapper missing). The whole Spark world is waiting on the same iceberg-spark-runtime change.
-
-**Oracle ADB** — blocked upstream of V3. `DBMS_CLOUD.CREATE_EXTERNAL_TABLE` errors `ORA-20000: Failed to generate column list` on every Iceberg table we've pointed it at — ours, Snowflake's Spark-lineage output, V2, V3, all identical. We've ruled out storage, producer, metrics, and auth. It's the reader.
+**Oracle ADB** — blocked upstream of V3. `DBMS_CLOUD.CREATE_EXTERNAL_TABLE` errors `ORA-20000: Failed to generate column list` on every Iceberg table we've pointed it at — ours, Snowflake's Spark-lineage output, V2, V3, all identical. We've ruled out storage, producer, metrics, and auth. It's the reader, and it sits before any V3-specific question can even be asked.
 
 ---
 
