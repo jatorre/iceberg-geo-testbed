@@ -159,7 +159,7 @@ Cell values:
 
 | Engine / version | N1 type recognized | N2 column readback | N3 predicate correct | N4 manifest geometry-bound pruning | W1 write V3 tables |
 |---|---|---|---|---|---|
-| **DuckDB 1.5.3** | ✅ — schema parses, `COUNT(*)` works | ✅ — typed `geometry('ogc:crs84')` materializes; `ST_AsText(geom)` returns WKT cleanly. **Cross-verified at L2 against both our hand-written V3 fixture AND Snowflake's own managed V3 table** — proves cross-engine V3 interop works at this level. The earlier "BLOB→GEOMETRY cast missing" finding was caused by our parquet writing geom as plain BINARY; once we promoted to GeoParquet 2.0 native `Geometry(crs=)` typing, DuckDB reads it directly without the cast. | ❌ — bound deserializer (`IcebergValue::DeserializeValue`) has no GEOMETRY branch; crashes on first spatial predicate. Same failure pattern on Snowflake-written V3 (different bytes, same crash), so this is unambiguously a DuckDB-side gap. See [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002). | ❌ — blocked by N3 today; tracking PR. Per PR description: *"This PR doesn't add support for upper bound and lower bounds for the geometry type. That is something we will add later."* | ❓ — not tested |
+| **DuckDB 1.5.3** | ✅ — schema parses, `COUNT(*)` works | ✅ — typed `geometry('ogc:crs84')` materializes; `ST_AsText(geom)` returns WKT cleanly. **Cross-verified at L2 against both our hand-written V3 fixture AND Snowflake's own managed V3 table** — proves cross-engine V3 interop works at this level. The earlier "BLOB→GEOMETRY cast missing" finding was caused by our parquet writing geom as plain BINARY; once we promoted to GeoParquet 2.0 native `Geometry(crs=)` typing, DuckDB reads it directly without the cast. | ✅ **via [duckdb-iceberg PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (open, base `v1.5-variegata`).** The fix short-circuits `IcebergPredicateStats::DeserializeBounds` for `GEOMETRY` and returns empty stats — the crash stops and the spatial predicate now returns correct rows. Verified by building the PR locally: `WHERE ST_Intersects(geom, ST_MakeEnvelope(...))` returns the right count on both our hand fixture and Snowflake's managed V3. *Without* the patch DuckDB 1.5.3 still crashes (`IcebergValue::DeserializeValue` has no `GEOMETRY` branch). See [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002). | ❌ — **explicitly deferred by PR #1013**. The fix discards geometry bounds rather than decoding them (in-source comment: *"DuckDB-Iceberg does not yet support deserializing avro blobs to geometry yet"*). EXPLAIN ANALYZE confirms full scan: 10/10 files on the hand fixture, 7/7 on Snowflake-managed V3 — no pruning fires on geometry bounds. | ❓ — not tested |
 | **BigQuery / BigLake** (2026-05) | ❌ — `Unknown Iceberg type "geometry(OGC:CRS84)"` at `CREATE EXTERNAL TABLE` | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `GEOGRAPHY` type also explicitly unsupported per [icebergmatrix.org](https://icebergmatrix.org/) |
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | ❌ — `Cannot parse type string to primitive: geometry(OGC:CRS84)` on `spark.read.format('iceberg').load(...)` | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `iceberg-spark-runtime` rejects Sedona's Geometry UDT: `java.lang.UnsupportedOperationException: User-defined types are not supported at SparkTypeVisitor.visit`. Even the reference V3 toolchain can't write native geometry today. |
 | **Snowflake (GA May 2026)** | ✅ verified via Snowflake-managed V3 path (`ICEBERG_VERSION=3` required — default for new Iceberg tables is V2; the error message `Unsupported data type 'GEOMETRY' for iceberg tables` doesn't hint at the V3 opt-in needed). Reads its own metadata cleanly. | ✅ — `SELECT geom` materializes as `GEOMETRY(4326)` | ✅ — `WHERE ST_INTERSECTS(geom, envelope)` returns the right rows | ✅ — `bytes_scanned=0` on the spatial predicate; Snowflake's manifest geometry-bound pruning is wired through end-to-end | ✅ — full write path works with `CATALOG='SNOWFLAKE'`. Writes Parquet-native `Geometry` columns (GeoParquet 2.0) + V3 manifest avro with `first_row_id` / geometry bounds populated using `packed_xy_le` (16-byte LE-double-X, LE-double-Y) — empirically matches our testbed's encoding. **Important caveat: V3 *unmanaged* read is not yet working.** We tried three external V3 fixtures (spec-minimal, spec-lineage at spec field IDs, Snowflake-lineage at Snowflake-internal field IDs) — all rejected with `incomplete state`. Since our metadata + manifests + parquets now byte-match Snowflake's own output, this isn't a strictness issue. The V3 unmanaged read path appears generally non-functional today. So Snowflake's V3 geometry support is real but currently bounded to "managed-only". Worth a Snowflake support follow-up. |
@@ -182,9 +182,13 @@ As of mid-2026:
 - **DuckDB jumped from N1 to N2** when we upgraded our V3 parquet
   files to use the native `Geometry(crs=)` logical type
   (GeoParquet 2.0). The earlier BLOB→GEOMETRY cast gap turned out
-  to be a fix-the-catalog issue, not a fix-the-engine issue. The
-  remaining N3 gap (bound deserializer in `duckdb-iceberg`) is the
-  only thing standing between DuckDB and full V3 file pruning today.
+  to be a fix-the-catalog issue, not a fix-the-engine issue.
+  **N3 unlocks with `duckdb-iceberg` PR #1013** (verified locally
+  2026-05-28): the spatial predicate no longer crashes and returns
+  correct rows. N4 (manifest geometry-bound pruning) is still
+  outstanding — that PR deliberately defers the bound deserializer,
+  so DuckDB falls back to a full scan; it would be the next
+  follow-up to close the gap to L3.
 - **Other engines** (BigQuery, Sedona/Iceberg-Spark, Databricks)
   reject the V3 geometry type at parse, before reaching N2.
 - **W1 outside of Snowflake**: Sedona/Iceberg-Spark — the supposed
@@ -221,19 +225,22 @@ covers both N2 and N3.
 
 ### **N3 spatial predicate correctness**
 
-DuckDB: `IcebergValue::DeserializeValue` in
-`src/core/expression/iceberg_value.cpp` needs a `GEOMETRY` branch. We
-have the encoding worked out in [docs/encoding.md](docs/encoding.md)
-and a reproducible fixture in `testbed/v3_geometry.py`. The author of
-PR #902 has acknowledged this as future work; a PR is welcome.
+DuckDB: **landed in [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013)**
+(open against `v1.5-variegata`). The fix bypasses bound deserialization
+for `GEOMETRY` columns in `IcebergPredicateStats::DeserializeBounds`,
+so spatial predicates evaluate correctly (returning empty stats means
+DuckDB cannot prune, but it cannot crash either). Verified end-to-end
+on hand and Snowflake-managed V3 fixtures.
 
 ### **N4 manifest geometry-bound pruning**
 
-The headline V3 feature. Even once N3 lands, this is a separate piece
-of work — the engine has to *use* the manifest bounds for file
-selection, not just deserialize them. The
-[duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)
-issue references this as the natural follow-up to the bound-deser fix.
+The headline V3 feature. PR #1013 explicitly defers this work — its
+fix returns empty stats for geometry bounds rather than decoding them,
+so DuckDB cannot prune on geometry bounds yet. The proper deserializer
+needs to handle the V3 `packed_xy_le` encoding (16-byte LE-double X,Y
+pair — see [docs/encoding.md](docs/encoding.md)) and feed `(xmin, ymin,
+xmax, ymax)` bounds into the file-pruning predicate. Tracked at
+[duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002).
 
 ### **W1 write V3 tables**
 
@@ -311,3 +318,12 @@ to the changelog.
 - **2026-05-28** — Repo split into geo / catalog tracks; catalog-access
   and REST-catalog interop detail consolidated in
   [STATUS_CATALOG.md](./STATUS_CATALOG.md). No V3-geometry cell changes.
+- **2026-05-28 (later)** — DuckDB N3 unlocked via
+  [duckdb-iceberg PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013).
+  Built the PR locally (base `v1.5-variegata`, DuckDB submodule pinned
+  at `2a172f10f4`); verified the spatial predicate no longer crashes
+  and returns the correct row count on both the hand fixture and
+  Snowflake's managed V3 table. EXPLAIN ANALYZE shows full-scan
+  behavior (10/10 and 7/7 files read) — N4 unchanged because the PR
+  discards geometry bounds rather than decoding them (in-source
+  comment confirms this is intentional and deferred).

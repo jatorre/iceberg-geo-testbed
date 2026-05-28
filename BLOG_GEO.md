@@ -48,7 +48,7 @@ Across three table shapes — **V2 flat bbox columns**, **V2 bbox struct**
 
 | Engine | V2 flat | V2 struct | V3 native geometry |
 |---|---|---|---|
-| **DuckDB 1.5.3** | **L3** | L2 (no struct pruning) | **L2** — type + `ST_AsText(geom)` work; spatial-predicate pruning blocked by a manifest bound-deserializer gap ([#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)) |
+| **DuckDB 1.5.3** | **L3** | L2 (no struct pruning) | **L2** — type + `ST_AsText(geom)` work; spatial predicates land via the in-flight [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013), but it skips the geometry-bound decoder, so it's a full scan ([#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)) |
 | **BigQuery / BigLake** | **L3** | **L3** | **L0** — `Unknown Iceberg type "geometry(OGC:CRS84)"` |
 | **Snowflake** (GA May 2026) | **L3** | **L3** | **L3 — managed only.** Spatial predicate correct *and* manifest geometry-bound pruning fires (`bytes_scanned=0`). Unmanaged/external read not yet functional. |
 | **Sedona + Iceberg-Spark 1.7.1** | **L3** | **L3** | **L0** — type rejected at parse; also can't *write* V3 geometry (UDT mapper missing) |
@@ -84,13 +84,18 @@ bounds at the table level.
 **DuckDB is L2 — not the "full" the public matrices claim, but not broken
 either.** [icebergmatrix.org](https://icebergmatrix.org) lists DuckDB V3 geometry
 as `full`. Hands-on: the type parses, and `SELECT geom` / `ST_AsText(geom)`
-return clean geometries — but a spatial *predicate* trips a manifest bound
-deserializer (`IcebergValue::DeserializeValue`) that has no `GEOMETRY` branch and
-crashes. One well-isolated gap between L2 and L3 pruning. We filed
-[duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002); the
-maintainer confirmed manifest bounds handling is the remaining piece. We
-cross-verified the gap against *Snowflake's own* managed V3 table — same crash,
-different bytes — so it's unambiguously DuckDB-side, not a fixture artifact.
+return clean geometries — but on stock 1.5.3 a spatial *predicate* trips a
+manifest bound deserializer (`IcebergValue::DeserializeValue`) that has no
+`GEOMETRY` branch and crashes. We filed
+[duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002), and
+the maintainer responded with [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013).
+We built it and re-tested: the crash is gone and the spatial predicate returns
+the right rows. The PR explicitly *skips* decoding the geometry bound (it
+returns empty stats), so DuckDB falls back to a full scan instead of pruning —
+making the predicate work without yet delivering L3. EXPLAIN ANALYZE confirms
+10/10 files on our fixture and 7/7 on Snowflake's managed V3. So the L2 cell is
+now solid (no crash, correct results) on both fixtures; closing the remaining
+gap to L3 needs a follow-up that actually decodes the V3 `packed_xy_le` bound.
 
 **The V2 bbox *struct* is not a portable pruning strategy; flat columns are.**
 A GeoParquet-1.1-style covering `bbox STRUCT<xmin,ymin,...>` reads fine
@@ -173,8 +178,10 @@ using bbox + WKB. The table stays portable for as long as you want.
   need native Parquet geometry typing (GeoParquet 2.0), not plain `BINARY`.
 
 Track [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)
-and per-engine V3 progress as the leading indicators — DuckDB has a clear,
-isolated fix path; the others need to accept the type token first.
+/ [#1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) and per-engine
+V3 progress as the leading indicators — DuckDB is one decoder change away
+from L3 now that the crash is gone; the others still need to accept the
+type token first.
 
 ## Try it
 

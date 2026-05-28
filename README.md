@@ -34,7 +34,7 @@ should prune to 1 file (196 rows).
 
 | Engine / version | V2 flat-bbox | V2 `bbox` struct | V3 native `geometry` |
 |---|---|---|---|
-| **DuckDB 1.5.3** | **L3** — prunes to 1/10 files | **L2** — correct, no struct-field pruning | **L2** — type + `ST_AsText(geom)` work (needs GeoParquet-2.0 native typing); spatial-predicate pruning blocked by a manifest bound-deserializer gap. [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002) |
+| **DuckDB 1.5.3** | **L3** — prunes to 1/10 files | **L2** — correct, no struct-field pruning | **L2** — type + `ST_AsText(geom)` work (needs GeoParquet-2.0 native typing); spatial predicates now work via [duckdb-iceberg PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (open) — but full-scan, since the PR defers the geometry-bound deserializer. [#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002) |
 | **BigQuery / BigLake** | **L3** | **L3** — prunes through struct fields too | **L0** — `Unknown Iceberg type "geometry(OGC:CRS84)"` |
 | **Snowflake** (GA May 2026) | **L3** (`bytes_scanned=0`) | **L3** | **L3 — managed only.** Spatial predicate correct + manifest geometry-bound pruning fires. Unmanaged/external read not yet functional. |
 | **Sedona + Iceberg-Spark 1.7.1** | **L3** | **L3** | **L0** — type rejected at parse; can't *write* V3 geometry either (UDT mapper gap) |
