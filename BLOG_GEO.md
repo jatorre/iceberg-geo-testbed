@@ -70,20 +70,23 @@ externally-written tables too.** A Snowflake-managed `GEOMETRY` table (note:
 `ICEBERG_VERSION=3` is required — the default for new Iceberg tables is V2,
 and the error if you forget doesn't hint at it) returns correct
 spatial-predicate results *and* prunes on the manifest's geometry bounds. We
-initially thought this only held for tables Snowflake itself manages; in fact,
-once we inspected one of Snowflake's own managed V3 parquet files we
-discovered the exact writer-shape its strict V3 reader expects, and pointed
-Snowflake at an externally-written fixture matching that shape — it works
-end-to-end (CREATE → 10000 rows → spatial predicate → file pruning at L3,
-~25 KB scanned vs ~256 KB for a full GEOM scan). The non-obvious requirements:
-the parquet must carry Snowflake-internal `METADATA$RL_ROW_ID` (field id
-2147483540) and `METADATA$RL_LAST_UPDATED_SEQUENCE_NUMBER` (field id
-2147483539) int64 columns filled with NULL, the metadata.json must omit the
-`row-lineage` key entirely (not `false`), set `last-column-id: 4` (reserving
-slots for the lineage cols), and the snapshot block needs the V3 fields
-(`first-row-id`, `added-rows`) plus a full append summary. With those, the
-headline V3 feature isn't vaporware — it works across the catalog boundary.
-The repo's `testbed/v3_geometry_snowflake_lineage.py` is the reference writer.
+initially thought this only held for tables Snowflake manages itself. A first
+round of debugging suggested Snowflake required its own internal
+`METADATA$RL_*` lineage columns plus uppercase column names and a
+`last-column-id` bump — that turned out to be wrong. Bisecting that
+hypothesis showed the actual requirements are spec-compliance, not
+Snowflake-specific tricks: (a) the V3 snapshot block must set `first-row-id`
+and `added-rows` (omitting these is what triggers Snowflake's `incomplete
+state` rejection on an external V3 table); and (b) for the spatial predicate
+to evaluate cleanly, the manifest needs populated `value_counts` /
+`null_value_counts` *and* `lower_bounds`/`upper_bounds` for the ID column too
+— without those, Snowflake's V3 manifest-bound pruner trips on the
+`packed_xy_le` geom bound with `Failed to cast variant value "..." to REAL`.
+With those properties present, an externally-written V3 table reads
+end-to-end on Snowflake (CREATE → 10000 rows → spatial predicate → file
+pruning at L3, ~25 KB scanned vs ~256 KB for a full GEOM scan). The repo's
+`testbed/v3_geometry.py` emits all of this and Snowflake reads it
+out-of-the-box.
 
 **V3 geometry needs GeoParquet-2.0-style native typing in the data files —
 plain WKB-in-`BINARY` isn't enough.** This is the single most useful practical
@@ -187,14 +190,14 @@ using bbox + WKB. The table stays portable for as long as you want.
 - **V2 with a GeoParquet-style bbox struct** — reads everywhere, but pruning is
   engine-dependent. Avoid for cross-engine portability.
 - **V3 native geometry** — viable inside Snowflake (both managed *and*
-  externally-written, as long as your writer emits the Snowflake-shape V3
-  with `METADATA$RL_*` lineage cols, the right snapshot block, etc.). Other
-  engines aren't there yet — most reject the type at parse, DuckDB reads but
-  doesn't prune. So V3 is portable *as a producer* if you write the
-  Snowflake-shape, and Snowflake will read it; but reading that same V3
-  table elsewhere is still limited. V2 stays the right answer for full
-  cross-engine portability. Also: V3 data files need native Parquet geometry
-  typing (GeoParquet 2.0), not plain `BINARY`.
+  externally-written) as long as your writer is V3-spec-compliant in the
+  snapshot block and populates per-file metrics in the manifest. Other
+  engines aren't there yet — most reject the type at parse, DuckDB reads
+  correctly but doesn't prune. So V3 is portable *as a producer* into
+  Snowflake; reading that same V3 table on other engines is still limited.
+  V2 stays the right answer for full cross-engine portability. Also: V3
+  data files need native Parquet geometry typing (GeoParquet 2.0), not
+  plain `BINARY`.
 
 Track [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)
 / [#1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) and per-engine

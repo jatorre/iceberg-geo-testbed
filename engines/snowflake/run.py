@@ -71,8 +71,11 @@ CASES = [
         # Snowflake's spatial syntax for V3 geometry — if the type binds
         # we can use ST_INTERSECTS directly on the typed column.
         predicate=(
+            # Snowflake's V3 GEOMETRY column has SRID 4326; a bare
+            # TO_GEOMETRY(wkt) defaults to SRID 0 and fails with
+            # "Incompatible SRID: 4326 and 0". Pass the SRID explicitly.
             "WHERE ST_INTERSECTS(geom, "
-            "TO_GEOMETRY('POLYGON((-125 32, -115 32, -115 42, -125 42, -125 32))'))"
+            "TO_GEOMETRY('POLYGON((-125 32, -115 32, -115 42, -125 42, -125 32))', 4326))"
         ),
         expected_rows=196,
         is_v3=True,
@@ -83,22 +86,7 @@ CASES = [
         # _row_id and _last_updated_sequence_number columns in parquet).
         predicate=(
             "WHERE ST_INTERSECTS(geom, "
-            "TO_GEOMETRY('POLYGON((-125 32, -115 32, -115 42, -125 42, -125 32))'))"
-        ),
-        expected_rows=196,
-        is_v3=True,
-    ),
-    Case(
-        # Empirical attempt: mirror Snowflake's *own* V3 parquet shape
-        # exactly — uppercase ID/GEOM column names, METADATA$RL_* lineage
-        # cols at Snowflake-internal field IDs filled with NULLs, and
-        # `row-lineage` omitted from metadata.json. If this gets past the
-        # "incomplete state" error, the gap was always writer-shape, not
-        # a fundamental Snowflake-unmanaged-V3 limitation.
-        name="v3_geometry_snowflake_lineage",
-        predicate=(
-            "WHERE ST_INTERSECTS(geom, "
-            "TO_GEOMETRY('POLYGON((-125 32, -115 32, -115 42, -125 42, -125 32))'))"
+            "TO_GEOMETRY('POLYGON((-125 32, -115 32, -115 42, -125 42, -125 32))', 4326))"
         ),
         expected_rows=196,
         is_v3=True,

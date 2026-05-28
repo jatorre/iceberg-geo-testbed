@@ -108,13 +108,24 @@ def build(
     data_files = []
     for region in REGIONS:
         p = _write_parquet(region)
+        # Populate per-file metrics on both columns. They're spec-optional
+        # but required for some strict V3 readers — Snowflake's V3
+        # manifest-bound pruner trips a variant-cast error on the
+        # `packed_xy_le` geom bound when these are missing for the ID
+        # column (`Failed to cast variant value "..." to REAL`), even
+        # though it parses the table fine. Populating value_counts +
+        # null_value_counts + lower/upper bounds for the ID column makes
+        # the predicate path work too.
+        first_id, last_id = f"{region.name}-0".encode(), f"{region.name}-999".encode()
         data_files.append(
             {
                 "path": f"data/{region.name}.parquet",
                 "size": p.stat().st_size,
                 "rows": 1000,
-                "lower": {2: enc(region.xmin, region.ymin)},
-                "upper": {2: enc(region.xmax, region.ymax)},
+                "lower": {1: first_id, 2: enc(region.xmin, region.ymin)},
+                "upper": {1: last_id, 2: enc(region.xmax, region.ymax)},
+                "value_counts": {1: 1000, 2: 1000},
+                "null_value_counts": {1: 0, 2: 0},
             }
         )
 
