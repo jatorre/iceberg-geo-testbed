@@ -19,12 +19,16 @@ Both tracks share one engine harness (`engines/`) and one set of fixtures
 ## 🌍 Track 1 — Geospatial on Iceberg
 
 **Punchline:** Iceberg V3's native geometry + per-file manifest bounds are the
-right architecture, but **only Snowflake delivers V3 end-to-end today, and only
-for tables it manages itself.** No engine reads a *portable, externally-written*
-V3 geometry table yet. The portable answer right now is a V2 convention —
-**GeoIceberg V2** ([SPEC.md](./SPEC.md)) — flat `double` bbox columns + a WKB
-column + a `geo` table property, which gets file-level spatial pruning on every
-engine that reads Iceberg V2. Full story in **[BLOG_GEO.md](./BLOG_GEO.md)**.
+right architecture, and **Snowflake delivers V3 end-to-end today — for both
+managed tables and externally-written ones**, provided the external writer
+matches Snowflake's V3 shape (see `testbed/v3_geometry_snowflake_lineage.py`).
+Other engines aren't there yet: most reject the type at parse, and DuckDB
+reads correctly but doesn't prune on geometry bounds (PR [#1013](https://github.com/duckdb/duckdb-iceberg/pull/1013)
+fixes the crash but skips the bound decoder). For maximum portability today
+the bridge is still a V2 convention — **GeoIceberg V2** ([SPEC.md](./SPEC.md))
+— flat `double` bbox columns + a WKB column + a `geo` table property, which
+gets file-level spatial pruning on every engine that reads Iceberg V2. Full
+story in **[BLOG_GEO.md](./BLOG_GEO.md)**.
 
 ### The matrix
 
@@ -36,7 +40,7 @@ should prune to 1 file (196 rows).
 |---|---|---|---|
 | **DuckDB 1.5.3** | **L3** — prunes to 1/10 files | **L2** — correct, no struct-field pruning | **L2** — type + `ST_AsText(geom)` work (needs GeoParquet-2.0 native typing); spatial predicates now work via [duckdb-iceberg PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (open) — but full-scan, since the PR defers the geometry-bound deserializer. [#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002) |
 | **BigQuery / BigLake** | **L3** | **L3** — prunes through struct fields too | **L0** — `Unknown Iceberg type "geometry(OGC:CRS84)"` |
-| **Snowflake** (GA May 2026) | **L3** (`bytes_scanned=0`) | **L3** | **L3 — managed only.** Spatial predicate correct + manifest geometry-bound pruning fires. Unmanaged/external read not yet functional. |
+| **Snowflake** (GA May 2026) | **L3** (`bytes_scanned=0`) | **L3** | **L3 — managed *and* externally-written.** Spatial predicate correct + manifest geometry-bound pruning fires on both paths. Unmanaged read works once the writer matches Snowflake's exact V3 shape (`testbed/v3_geometry_snowflake_lineage.py`). |
 | **Sedona + Iceberg-Spark 1.7.1** | **L3** | **L3** | **L0** — type rejected at parse; can't *write* V3 geometry either (UDT mapper gap) |
 | **Databricks (DBSQL 2026.10)** | **L2** *via Snowflake federation* | **L2** *via federation* | **L0** — `GEOMETRY(SRID)`/`GEOGRAPHY(SRID)` work in *Delta*, not in its Iceberg-compat writer; likely coming soon |
 | **Oracle ADB 26ai** | **L0** | **L0** | **L0** — can't read our Iceberg tables at all (reader-side; see catalog track) |

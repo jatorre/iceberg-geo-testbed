@@ -35,6 +35,53 @@ from pyiceberg.schema import Schema
 from pyiceberg.typedef import Record
 
 
+def _build_snapshot_block(
+    *,
+    snapshot_id: int,
+    sequence_number: int,
+    manifest_list_uri: str,
+    data_files: list[dict],
+    format_version: int,
+) -> dict:
+    """Construct the metadata.json snapshot block.
+
+    Snowflake's V3 reader expects a richer snapshot than the bare
+    `{operation: append}` summary that satisfies V2 readers. Mirror
+    Snowflake-managed V3's own shape so Snowflake's strict V3 reader
+    accepts an externally-written table.
+    """
+    total_records = sum(d["rows"] for d in data_files)
+    total_files = len(data_files)
+    total_size = sum(d.get("size", 0) for d in data_files)
+    block = {
+        "snapshot-id": snapshot_id,
+        "sequence-number": sequence_number,
+        "timestamp-ms": snapshot_id,
+        "manifest-list": manifest_list_uri,
+        "schema-id": 0,
+        "summary": {
+            "operation": "append",
+            "added-data-files": str(total_files),
+            "added-records": str(total_records),
+            "added-files-size": str(total_size),
+            "total-data-files": str(total_files),
+            "total-records": str(total_records),
+            "total-files-size": str(total_size),
+            "total-delete-files": "0",
+            "total-equality-deletes": "0",
+            "total-position-deletes": "0",
+            "changed-partition-count": "1",
+        },
+    }
+    if format_version >= 3:
+        # V3 spec: snapshots carry `first-row-id` (the lowest row ID
+        # assigned by this snapshot) and `added-rows`. Snowflake's
+        # managed V3 emits both even when row-lineage is omitted.
+        block["first-row-id"] = 0
+        block["added-rows"] = total_records
+    return block
+
+
 # pyiceberg 0.11.1 has manifest schemas defined for V1/V2/V3 but the
 # write_manifest() / write_manifest_list() entrypoints explicitly reject
 # version=3. We unblock V3 writes by subclassing the V2 writers and just
@@ -166,7 +213,8 @@ def write_static_catalog(
     location_uri: str | None = None,
     meta_dir_name: str = "metadata",
     extra_properties: dict[str, str] | None = None,
-    row_lineage: bool = False,
+    row_lineage: bool | None = False,
+    last_column_id_override: int | None = None,
 ) -> Path:
     """Write metadata.json + manifest + manifest-list for a table.
 
@@ -333,7 +381,11 @@ def write_static_catalog(
         "location": location_uri,
         "last-sequence-number": sequence_number,
         "last-updated-ms": snapshot_id,
-        "last-column-id": max(f["id"] for f in schema_json_fields if "id" in f),
+        "last-column-id": (
+            last_column_id_override
+            if last_column_id_override is not None
+            else max(f["id"] for f in schema_json_fields if "id" in f)
+        ),
         "current-schema-id": 0,
         "schemas": [{"schema-id": 0, "type": "struct", "fields": schema_json_fields}],
         "default-spec-id": 0,
@@ -348,14 +400,13 @@ def write_static_catalog(
         "current-snapshot-id": snapshot_id,
         "refs": {"main": {"snapshot-id": snapshot_id, "type": "branch"}},
         "snapshots": [
-            {
-                "snapshot-id": snapshot_id,
-                "sequence-number": sequence_number,
-                "timestamp-ms": snapshot_id,
-                "manifest-list": f"{location_uri}/metadata/{manifest_list_path.name}",
-                "summary": {"operation": "append"},
-                "schema-id": 0,
-            }
+            _build_snapshot_block(
+                snapshot_id=snapshot_id,
+                sequence_number=sequence_number,
+                manifest_list_uri=f"{location_uri}/metadata/{manifest_list_path.name}",
+                data_files=data_files,
+                format_version=format_version_in_metadata,
+            )
         ],
         "snapshot-log": [{"snapshot-id": snapshot_id, "timestamp-ms": snapshot_id}],
         "metadata-log": [],
@@ -374,12 +425,15 @@ def write_static_catalog(
         metadata["next-row-id"] = sum(d["rows"] for d in data_files)
         metadata["statistics"] = []
         metadata["partition-statistics"] = []
-        # `row-lineage` is an explicit V3 flag. False (default here)
-        # means data files don't carry the `_row_id` /
-        # `_last_updated_sequence_number` metadata columns. True means
-        # they MUST be present in every data file. The caller is
-        # responsible for ensuring the parquet writer matches.
-        metadata["row-lineage"] = row_lineage
+        # `row-lineage` is an explicit V3 flag. False means data files
+        # don't carry the `_row_id` / `_last_updated_sequence_number`
+        # metadata columns; True means they MUST be present in every
+        # data file. Pass None to omit the key entirely — Snowflake's
+        # own managed V3 writer doesn't emit it, and matching that
+        # exactly is what lets Snowflake's strict V3 reader accept
+        # an externally-written fixture.
+        if row_lineage is not None:
+            metadata["row-lineage"] = row_lineage
     metadata_json_path = meta_dir / "v1.metadata.json"
     metadata_json_path.write_text(json.dumps(metadata, indent=2))
     return metadata_json_path

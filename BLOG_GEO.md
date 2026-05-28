@@ -19,16 +19,20 @@ matrix. Everything is reproducible from a public bucket.
 
 ## The headline
 
-**Only Snowflake delivers V3 geometry end-to-end — and only for tables it
-manages itself.** No engine we tested can yet read a *portable,
-externally-written* V3 geometry table. Every other engine sits between "rejects
-the type at parse" (BigQuery, Sedona, Databricks, Oracle) and "reads the column
-but can't prune on it" (DuckDB).
+**Snowflake delivers V3 geometry end-to-end — for both managed *and*
+externally-written tables — provided the external writer matches Snowflake's
+exact V3 shape.** We initially thought this was "managed only"; that was a
+writer-shape issue on our side, not a Snowflake limitation. The other engines
+sit between "rejects the type at parse" (BigQuery, Sedona, Databricks, Oracle)
+and "reads the column, doesn't prune on geometry bounds" (DuckDB with the
+in-flight crash-fix PR).
 
-So if you have geospatial data and want fast, *portable* Iceberg queries today,
-V3 isn't the answer yet. The good news: there's a convention that gets you
-file-level spatial pruning across every engine that reads Iceberg V2 — modelled
-directly on how GeoParquet 1.1 solved the same problem at the Parquet layer.
+So if you have geospatial data and you're in the Snowflake ecosystem, V3 is
+ready. If you need *broad cross-engine portability* today, V3 still isn't —
+only Snowflake's V3 reader is. The good news for that case: there's a V2
+convention that gets you file-level spatial pruning across every engine that
+reads Iceberg V2 — modelled directly on how GeoParquet 1.1 solved the same
+problem at the Parquet layer.
 
 ## What we measured
 
@@ -50,7 +54,7 @@ Across three table shapes — **V2 flat bbox columns**, **V2 bbox struct**
 |---|---|---|---|
 | **DuckDB 1.5.3** | **L3** | L2 (no struct pruning) | **L2** — type + `ST_AsText(geom)` work; spatial predicates land via the in-flight [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013), but it skips the geometry-bound decoder, so it's a full scan ([#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)) |
 | **BigQuery / BigLake** | **L3** | **L3** | **L0** — `Unknown Iceberg type "geometry(OGC:CRS84)"` |
-| **Snowflake** (GA May 2026) | **L3** | **L3** | **L3 — managed only.** Spatial predicate correct *and* manifest geometry-bound pruning fires (`bytes_scanned=0`). Unmanaged/external read not yet functional. |
+| **Snowflake** (GA May 2026) | **L3** | **L3** | **L3 — managed *and* externally-written.** Spatial predicate correct *and* manifest geometry-bound pruning fires on both. The external path requires matching Snowflake's exact V3 shape (lineage cols, snapshot fields, etc. — see below). |
 | **Sedona + Iceberg-Spark 1.7.1** | **L3** | **L3** | **L0** — type rejected at parse; also can't *write* V3 geometry (UDT mapper missing) |
 | **Databricks (DBSQL 2026.10)** | (via federation) | (via federation) | **L0** — `GEOMETRY(SRID)`/`GEOGRAPHY(SRID)` work in *Delta*, but the Iceberg-compat writer rejects them; geo-in-Iceberg likely coming soon |
 | **Oracle ADB 26ai** | **L0** | **L0** | **L0** — can't read our Iceberg tables at all (reader-side, not a geometry-specific issue) |
@@ -61,14 +65,25 @@ care about the geometry side.)
 
 ## The findings worth knowing
 
-**Snowflake's managed V3 geometry actually works — proof the architecture is
-sound.** A Snowflake-managed `GEOMETRY` table (note: `ICEBERG_VERSION=3` is
-required — the default for new Iceberg tables is V2, and the error if you forget
-doesn't hint at it) returns correct spatial-predicate results *and* prunes on
-the manifest's geometry bounds. So per-file geometry bounds aren't vaporware:
-when an engine both writes and reads its own V3, the headline feature delivers.
-The catch is the word "own" — Snowflake can't yet read an externally-written V3
-table, and neither can anyone else.
+**Snowflake's V3 geometry actually works — and the architecture proves out for
+externally-written tables too.** A Snowflake-managed `GEOMETRY` table (note:
+`ICEBERG_VERSION=3` is required — the default for new Iceberg tables is V2,
+and the error if you forget doesn't hint at it) returns correct
+spatial-predicate results *and* prunes on the manifest's geometry bounds. We
+initially thought this only held for tables Snowflake itself manages; in fact,
+once we inspected one of Snowflake's own managed V3 parquet files we
+discovered the exact writer-shape its strict V3 reader expects, and pointed
+Snowflake at an externally-written fixture matching that shape — it works
+end-to-end (CREATE → 10000 rows → spatial predicate → file pruning at L3,
+~25 KB scanned vs ~256 KB for a full GEOM scan). The non-obvious requirements:
+the parquet must carry Snowflake-internal `METADATA$RL_ROW_ID` (field id
+2147483540) and `METADATA$RL_LAST_UPDATED_SEQUENCE_NUMBER` (field id
+2147483539) int64 columns filled with NULL, the metadata.json must omit the
+`row-lineage` key entirely (not `false`), set `last-column-id: 4` (reserving
+slots for the lineage cols), and the snapshot block needs the V3 fields
+(`first-row-id`, `added-rows`) plus a full append summary. With those, the
+headline V3 feature isn't vaporware — it works across the catalog boundary.
+The repo's `testbed/v3_geometry_snowflake_lineage.py` is the reference writer.
 
 **V3 geometry needs GeoParquet-2.0-style native typing in the data files —
 plain WKB-in-`BINARY` isn't enough.** This is the single most useful practical
@@ -171,11 +186,15 @@ using bbox + WKB. The table stays portable for as long as you want.
   Iceberg V2, with provable file pruning. **Recommended.**
 - **V2 with a GeoParquet-style bbox struct** — reads everywhere, but pruning is
   engine-dependent. Avoid for cross-engine portability.
-- **V3 native geometry** — viable **only inside a single managed platform**
-  today (Snowflake-managed). No engine reads another's externally-written V3
-  yet, so it's not a portable choice. If you're all-in on one vendor that
-  supports it, use it; otherwise V2 is the bridge. And remember: V3 data files
-  need native Parquet geometry typing (GeoParquet 2.0), not plain `BINARY`.
+- **V3 native geometry** — viable inside Snowflake (both managed *and*
+  externally-written, as long as your writer emits the Snowflake-shape V3
+  with `METADATA$RL_*` lineage cols, the right snapshot block, etc.). Other
+  engines aren't there yet — most reject the type at parse, DuckDB reads but
+  doesn't prune. So V3 is portable *as a producer* if you write the
+  Snowflake-shape, and Snowflake will read it; but reading that same V3
+  table elsewhere is still limited. V2 stays the right answer for full
+  cross-engine portability. Also: V3 data files need native Parquet geometry
+  typing (GeoParquet 2.0), not plain `BINARY`.
 
 Track [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)
 / [#1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) and per-engine

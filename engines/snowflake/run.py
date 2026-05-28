@@ -88,6 +88,21 @@ CASES = [
         expected_rows=196,
         is_v3=True,
     ),
+    Case(
+        # Empirical attempt: mirror Snowflake's *own* V3 parquet shape
+        # exactly — uppercase ID/GEOM column names, METADATA$RL_* lineage
+        # cols at Snowflake-internal field IDs filled with NULLs, and
+        # `row-lineage` omitted from metadata.json. If this gets past the
+        # "incomplete state" error, the gap was always writer-shape, not
+        # a fundamental Snowflake-unmanaged-V3 limitation.
+        name="v3_geometry_snowflake_lineage",
+        predicate=(
+            "WHERE ST_INTERSECTS(geom, "
+            "TO_GEOMETRY('POLYGON((-125 32, -115 32, -115 42, -125 42, -125 32))'))"
+        ),
+        expected_rows=196,
+        is_v3=True,
+    ),
 ]
 
 
