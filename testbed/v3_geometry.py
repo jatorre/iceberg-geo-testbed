@@ -2,11 +2,12 @@
 
 The reference V3 geo fixture for this testbed. Goals:
 
-  - **GeoParquet 2.0 typed parquet files.** The `geom` column is written
-    with Parquet's native `Geometry` logical type (`BYTE_ARRAY` physical,
-    WKB encoded), via the `geoarrow-pyarrow` extension. This matches the
-    V3-era Iceberg + Parquet spec direction and is what a real V3 reader
-    expects to see.
+  - **GeoParquet 2.0 parquet files.** The `geom` column is written with
+    Parquet's native `Geometry` logical type (`BYTE_ARRAY` physical, WKB
+    encoded), via the `geoarrow-pyarrow` extension — what a V3 reader
+    expects — and each file carries the GeoParquet 2.0 `geo` footer
+    metadata (version 2.0.0, per-file bbox) so it is a conformant
+    GeoParquet 2.0 file on its own. Iceberg never reads that footer.
 
   - **Spec-minimal V3.** `format-version: 3` with `row-lineage: false`
     explicitly. We do NOT emit the V3 row-lineage metadata columns
@@ -36,9 +37,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import geoarrow.pyarrow as ga
 from pyiceberg.schema import Schema
-from pyiceberg.types import BinaryType, NestedField, StringType
+from pyiceberg.types import GeometryType, NestedField, StringType
 
-from .common import REGIONS, packed_xy_le, stable_seed, wkb_point_le
+from .common import REGIONS, geoparquet_geo_metadata, packed_xy_le, stable_seed, wkb_point_le
 from ._static_catalog import write_static_catalog
 
 ROOT = Path(__file__).parent.parent / "data" / "v3_geometry"
@@ -48,14 +49,14 @@ def _field_meta(field_id: int) -> dict:
     return {"PARQUET:field_id": str(field_id)}
 
 
-# pyiceberg 0.11.1 has no GeometryType — fall back to BinaryType in the python
-# schema (used only by the manifest writer to validate field types). The actual
-# column type is declared in the hand-written metadata.json (as bare
-# "geometry") and in the parquet file (as native Geometry logical type via
-# geoarrow-pyarrow).
+# pyiceberg >= 0.12.0 has a native GeometryType; it serializes as the bare
+# "geometry" token, the same shape Snowflake's V3 writer emits. This python
+# schema is only consumed by the manifest writer — the column type readers
+# see is declared in the hand-written metadata.json and in the parquet file
+# (native Geometry logical type via geoarrow-pyarrow).
 PY_SCHEMA = Schema(
     NestedField(1, "id", StringType(), required=False),
-    NestedField(2, "geom", BinaryType(), required=False),
+    NestedField(2, "geom", GeometryType(), required=False),
 )
 
 # The geom field is written as a geoarrow.wkb extension array which
@@ -73,15 +74,21 @@ ARROW_SCHEMA = pa.schema(
 def _write_parquet(region) -> Path:
     rng = random.Random(stable_seed(region.name))
     rows = 1000
-    ids, wkbs = [], []
+    ids, wkbs, xs, ys = [], [], [], []
     for i in range(rows):
         x = rng.uniform(region.xmin, region.xmax)
         y = rng.uniform(region.ymin, region.ymax)
         ids.append(f"{region.name}-{i}")
         wkbs.append(wkb_point_le(x, y))
+        xs.append(x)
+        ys.append(y)
     geom_arr = GEOM_EXT_TYPE.wrap_array(pa.array(wkbs, type=pa.binary()))
     table = pa.table({"id": pa.array(ids, type=pa.string()), "geom": geom_arr},
                      schema=ARROW_SCHEMA)
+    # GeoParquet 2.0 `geo` footer (per-file bbox); Iceberg ignores it.
+    table = table.replace_schema_metadata(
+        {"geo": geoparquet_geo_metadata("geom", xs=xs, ys=ys)}
+    )
     out_dir = ROOT / "data"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{region.name}.parquet"
@@ -169,11 +176,12 @@ if __name__ == "__main__":
     print(f"bound encoding: {args.encoding}")
     print()
     print(
-        "DuckDB probe (expected: bound deserialization failure today; "
-        "Total Files Read: 1 once DuckDB lands the GEOMETRY branch):"
+        "DuckDB probe (>= 1.5.6: expected Total Files Read: 1 — manifest "
+        "geometry-bound pruning fires on bbox predicates; a plain "
+        "ST_Intersects returns the same rows but reads all 10 files):"
     )
     print(
         f"  duckdb -c \"LOAD iceberg; LOAD spatial; EXPLAIN ANALYZE SELECT COUNT(*) "
         f"FROM iceberg_scan('{path}') "
-        f"WHERE ST_Intersects(geom, ST_MakeEnvelope(-125, 32, -115, 42));\""
+        f"WHERE ST_Intersects_Extent(geom, ST_MakeEnvelope(-125, 32, -115, 42));\""
     )

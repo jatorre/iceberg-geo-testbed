@@ -99,3 +99,34 @@ def parquet_metrics(path, field_ids: list[int]) -> tuple[dict, dict, dict]:
                 if nc is not None:
                     null_value_counts[fid] += nc
     return column_sizes, value_counts, null_value_counts
+
+
+def geoparquet_geo_metadata(
+    primary_column: str,
+    *,
+    xs: list[float],
+    ys: list[float],
+    geometry_types: list[str] = ("Point",),
+    edges: str | None = None,
+) -> str:
+    """JSON string for the GeoParquet 2.0 `geo` footer key.
+
+    GeoParquet 2.0.0-rc.1 builds on the native Parquet GEOMETRY/GEOGRAPHY
+    logical types but still requires the `geo` key for a file to be
+    *conformant* (a native-types-only file is "parquet-geo-only"). We omit
+    `crs`, so the OGC:CRS84 default matches the absent Parquet-level `crs`;
+    `edges` must agree with the Parquet GEOGRAPHY `algorithm` when set.
+    Iceberg readers ignore this key entirely.
+    """
+    import json
+
+    col: dict = {
+        "encoding": "WKB",
+        "geometry_types": list(geometry_types),
+        "bbox": [min(xs), min(ys), max(xs), max(ys)],
+    }
+    if edges is not None:
+        col["edges"] = edges
+    return json.dumps(
+        {"version": "2.0.0", "primary_column": primary_column, "columns": {primary_column: col}}
+    )

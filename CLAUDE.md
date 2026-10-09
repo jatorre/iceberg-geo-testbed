@@ -99,7 +99,7 @@ validator again.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
-brew install duckdb                                   # ≥ 1.5.3
+brew install duckdb                                   # ≥ 1.5.6
 
 # fixtures (deterministic; California probe = 196 rows)
 python -m testbed.v2_flat_columns        # + v2_bbox_struct, v2_geo_convention, v3_geometry
@@ -143,10 +143,28 @@ engine scripts do.
 - **Cloudflare Worker** — a fresh workers.dev subdomain takes minutes to
   provision TLS; Cloudflare may `403` (`error 1010`) a `python-urllib`
   user-agent — use a normal UA for tests (real clients are fine).
-- **pyiceberg 0.11.1** can't write V3 manifests — `testbed/_static_catalog.py`
+- **pyiceberg (0.11.1 and 0.12.0)** can't write V3 manifests —
+  `write_manifest()` rejects `format_version=3`, so `testbed/_static_catalog.py`
   subclasses the V2 manifest writers to emit V3 (with `first_row_id`, etc.).
+  0.12.0 does add `GeometryType`/`GeographyType` (the fixture writers use them;
+  `requirements.txt` pins `>=0.12.0`), but its `to_arrow()` rejects the
+  `geoarrow.wkb` extension type our GeoParquet-2.0 files carry.
+- **GeoParquet 2.0 conformance = native logical type AND the `geo` footer.**
+  The V3 writers emit both (helper `testbed/common.py:geoparquet_geo_metadata`).
+  Validate with `pip install --pre geoparquet-io && gpio check all <file>`.
+  Don't use `gpio convert` to add the footer to fixtures: it drops the
+  `PARQUET:field_id` field metadata Iceberg name-mapping relies on. gpio
+  1.5.0 and 1.6.0 crash on files with neither geo statistics nor a `geo` bbox (pyarrow
+  writes row-group geo stats for GEOMETRY only, not GEOGRAPHY — the footer
+  bbox is what keeps `v3_geography` checkable).
+- **DuckDB pruning on V3 geometry needs a bbox predicate.** On 1.5.6,
+  `ST_Intersects_Extent(geom, env)` / `geom && env` prune to 1/10 files; a plain
+  `ST_Intersects` is correct but reads all files (no optimizer rewrite in
+  duckdb-spatial). Use `ST_Intersects_Extent(...) AND ST_Intersects(...)`.
 - **Determinism** — `testbed/common.py:stable_seed` (sha256) makes fixture
-  parquet byte-identical across processes; the probe is always 196 rows.
+  parquet byte-identical across processes *for the same pyarrow version*;
+  across pyarrow versions only the `created_by` footer string differs
+  (content-identical). The probe is always 196 rows.
 
 ## Conventions & user preferences
 
@@ -164,9 +182,21 @@ engine scripts do.
 
 ## Open threads (not yet done)
 
-- **duckdb-iceberg#1002** — the manifest geometry-bound deserializer; DuckDB
-  maintainer acknowledged. Re-test when a branch lands → would flip DuckDB V3
-  to L3.
+- **DuckDB follow-ups** (duckdb-iceberg#1002 is closed; V3 is L3 on
+  1.5.6): (a) `ST_Intersects` → bbox pre-filter rewrite so pruning is
+  automatic (duckdb-spatial); (b) `geography` type mapping in `iceberg_scan`
+  (duckdb-iceberg: `Not implemented Error: Geography support`). Neither is
+  filed yet (none found as of 2026-10-09). duckdb-iceberg#1467 (`&&`
+  pushdown) is on `main`/2.0 only, and #1464 reports `&&` pruning regressing on
+  the 2.0 nightly — re-check pruning when 2.0 ships.
+- **pyiceberg 0.12.0** — `scan().to_arrow()` fails on the `geoarrow.wkb`
+  extension type (`UnsupportedPyArrowTypeException`) for our V3 fixtures
+  (also on Snowflake-written V3). Tracked upstream in
+  apache/iceberg-python#4079; re-test when a fix lands.
+- **Spark geometry** — Apache Iceberg 1.12.0 (2026-09-30) ships Spark 4.1
+  geometry read/write (#16851, #17073) and geometry bbox metrics (#17161).
+  Re-run `engines/sedona` / Dataproc / EMR probes on `iceberg-spark-runtime`
+  1.12.0.
 - **Databricks geo-in-Iceberg** — re-test periodically (works in Delta, not yet
   in the Iceberg-compat writer).
 - **Microsoft Fabric** — untested (no access); the one empty cell in the catalog

@@ -50,6 +50,6 @@ encoding above is what those blobs contain for geometry/geography fields.
 |---|---|---|
 | Apache Sedona | yes | Reference implementation (Havasu lineage). |
 | Snowflake | yes | Per V3 GA announcement; used for spatial pruning. |
-| DuckDB 1.5.3 | **no** | Schema/data path wired; `DeserializeValue` lacks the geometry case. See [duckdb-gap.md](./duckdb-gap.md). |
+| DuckDB 1.5.6 | **yes** | Decodes `packed_xy_le` into a `GeometryStats` extent ([duckdb-iceberg#1030](https://github.com/duckdb/duckdb-iceberg/pull/1030)); prunes on `&&` / `ST_Intersects_Extent`. 1.5.3 lacked the geometry case — see [duckdb-gap.md](./duckdb-gap.md). |
 | BigLake / BigQuery | unverified | Listed as supporting V3 geo; needs runner. |
-| PyIceberg 0.11.1 | partial | Read side; no `GeometryType` in writer surface. |
+| PyIceberg 0.12.0 | partial | `GeometryType`/`GeographyType` exist and V3 metadata parses; `write_manifest()` still rejects V3, and `to_arrow()` rejects the GeoParquet-2.0 `geoarrow.wkb` extension type. |

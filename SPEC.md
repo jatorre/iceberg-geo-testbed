@@ -27,16 +27,16 @@ Iceberg V3 (mid-2025) introduced native `geometry`/`geography` types
 with per-file bounds in the manifest, promising file-level pruning for
 spatial predicates. As of mid-2026, **no engine reads a *portable,
 externally-written* V3 geometry table end-to-end.** The one exception is
-Snowflake, which delivers V3 geometry fully — but only for tables it
-*manages itself*; it can't yet read an externally-produced V3 table.
-Everyone else rejects the type at parse, or (DuckDB) reads the column but
-can't prune on it. See **[STATUS_V3.md](./STATUS_V3.md)** for the live
+Snowflake, which delivers V3 geometry fully for the tables it manages and
+for externally-produced ones with a spec-compliant writer, and DuckDB 1.5.6,
+which reads and prunes on it with bbox predicates. Everyone else rejects the
+type at parse. See **[STATUS_V3.md](./STATUS_V3.md)** for the live
 per-engine detail. In summary:
 
-- **DuckDB 1.5.3**: reads typed geometry fine (once the parquet uses
-  GeoParquet-2.0 native typing), but `IcebergValue::DeserializeValue` has
-  no `GEOMETRY` branch, so the first spatial predicate's manifest-bound
-  pruning fails ([duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)).
+- **DuckDB 1.5.6**: reads typed geometry (once the parquet uses
+  GeoParquet-2.0 native typing) and prunes on the manifest geometry bounds
+  via `ST_Intersects_Extent` / `&&` ([duckdb-iceberg#1030](https://github.com/duckdb/duckdb-iceberg/pull/1030));
+  plain `ST_Intersects` is correct but full-scans.
 - **BigQuery / Sedona**: reject the `geometry(...)` type token at parse.
   Sedona's Iceberg-Spark also can't **write** V3 geometry (UDT mapper missing).
 - **Databricks DBSQL 2026.10**: `GEOMETRY(SRID)`/`GEOGRAPHY(SRID)` work in
@@ -52,8 +52,12 @@ because Parquet didn't yet have native geometry types, defining a
 *convention layered on top* (a covering `bbox` struct + a WKB column +
 a `geo` metadata block) so engines could deliver spatial pruning by
 leveraging existing column-stats infrastructure. When Parquet later
-gained native geometry types (→ GeoParquet 2.0), the convention was
-adopted as the migration target.
+gained native geometry types, [GeoParquet 2.0](https://github.com/opengeospatial/geoparquet/releases/tag/v2.0.0-rc.1) made them its
+foundation — and, tellingly, the optional `covering` bbox column was
+[brought back](https://github.com/opengeospatial/geoparquet/pull/302) after the release candidate: native geospatial
+statistics exist only per row group, while an ordinary bbox struct gets
+a page index and serves readers that predate the native types. The
+convention outlived the gap it was built for.
 
 **This document proposes the same pattern for Iceberg V2.**
 
@@ -76,16 +80,18 @@ treated as independent:
                               │
                               ↓  (within each surviving file)
 ┌──────────────────────────────────────────────────────────────┐
-│  GeoParquet 1.1  (or 2.0 once native)                        │
-│    • Per-row-group bbox struct → row-group level pruning     │
+│  GeoParquet 2.0 (or 1.1)                                     │
+│    • Native GEOMETRY stats and/or bbox struct → row-group /  │
+│      page level pruning                                      │
 │    • Per-file `geo` metadata in parquet footer               │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-A writer following GeoIceberg V2 **SHOULD** also follow GeoParquet 1.1
-for the underlying parquet files. A reader implementing GeoIceberg V2
-file pruning does not need to understand GeoParquet 1.1 — pruning at
-each layer is independent.
+A writer following GeoIceberg V2 **SHOULD** also follow GeoParquet
+(2.0, or 1.1 where the writer lacks native Parquet geometry types) for
+the underlying parquet files. A reader implementing GeoIceberg V2 file
+pruning does not need to understand GeoParquet — pruning at each layer
+is independent.
 
 ---
 
@@ -215,11 +221,14 @@ For best performance, writers **SHOULD**:
 - **Target ~64–512 MB per data file.** Smaller files inflate manifest
   size and lookup cost; larger files reduce pruning granularity.
 - **Target ~1M rows per row group** within each parquet file. This is
-  the GeoParquet 1.1 layer's pruning granularity.
-- **Write data files as GeoParquet 1.1** (or 2.0 once parquet-native
-  is supported by the writer). The two conventions compose; following
-  GeoParquet 1.1 inside each file extends pruning to the row-group
-  level after file pruning has selected the surviving files.
+  the GeoParquet layer's pruning granularity (row-group geospatial
+  statistics; page-level with an optional `covering` bbox column).
+- **Write data files as GeoParquet 2.0** (native `GEOMETRY` logical type
+  + `geo` footer metadata), or 1.1 if the writer can't emit native
+  Parquet geometry types. The conventions compose; GeoParquet inside
+  each file extends pruning to the row-group / page level after file
+  pruning has selected the surviving files. The optional 2.0 `covering`
+  bbox column ([#302](https://github.com/opengeospatial/geoparquet/pull/302)) is the same idea one level down.
 - **Populate per-file column statistics** (`column_sizes`,
   `value_counts`, `null_value_counts`). Standard Iceberg writers do this
   automatically and it's good hygiene. (We initially suspected Oracle ADB
@@ -302,10 +311,17 @@ this convention is bridging to.
   awareness default to the `primary_column` when geometry-aware SQL
   functions are called without an explicit column? GeoParquet's
   behavior here is the obvious reference.
-- **Geography vs geometry.** GeoParquet 1.1 conflates them via `edges`
-  (planar vs spherical). Iceberg V3 separates them as distinct types.
-  This V2 convention follows GeoParquet 1.1 and uses `edges`; V3
-  migration is a type-token change, not a structural one.
+- **Geography vs geometry.** GeoParquet 1.x conflates them via `edges`
+  (planar vs spherical); 2.0 keeps `edges` in the `geo` metadata and
+  requires it to agree with the Parquet `GEOGRAPHY` `algorithm`. Iceberg
+  V3 separates them as distinct types. This V2 convention uses `edges`;
+  V3 migration is a type-token change, not a structural one.
+- **Should the testbed's V2 data files be GeoParquet too?** This spec
+  says writers SHOULD follow GeoParquet, but `v2_geo_convention`'s
+  parquet files are plain `BINARY` with no `geo` footer (they fail
+  `gpio check`). Keeping the WKB column un-typed exercises engines
+  without native geometry types — the population this convention
+  targets — but a `geo` footer (1.1-style) would cost nothing. Open.
 - **CRS for the bbox columns.** This document requires the bbox
   columns to be in the same CRS as the geometry payload. Should mixed
   CRS (e.g. geometry in projected, bbox in WGS84) be permitted? We

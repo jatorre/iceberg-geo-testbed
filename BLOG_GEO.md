@@ -11,7 +11,7 @@ We knew engine support wouldn't land the day the spec was approved. Almost a yea
 We built [`iceberg-geo-testbed`](https://github.com/jatorre/iceberg-geo-testbed) — a small, public repo with a reproducible set of geospatial Iceberg fixtures and per-engine probes:
 
 - A **static Iceberg REST catalog** (the "Portolan" pattern — pre-rendered JSON on a bucket) exposing both V2 and V3 tables, served public on GCS and S3.
-- **GeoParquet 2.0–typed parquet files** as the data layer — geometry as Parquet's native `Geometry(crs=)` logical type, not plain `BINARY`. (Iceberg V3 geometry is GeoParquet 2.0 typing at the file level + Iceberg manifest bounds at the table level. The two specs are coupled.)
+- **GeoParquet 2.0 parquet files** as the data layer — geometry as Parquet's native `Geometry(crs=)` logical type, not plain `BINARY`, plus the `geo` footer metadata the [2.0 release candidate](https://github.com/opengeospatial/geoparquet/releases/tag/v2.0.0-rc.1) requires for conformance. (Iceberg V3 geometry is that native Parquet typing at the file level + Iceberg manifest bounds at the table level; Iceberg itself never looks at the `geo` metadata. The two specs are coupled at the type.)
 - **Per-engine runners** that probe each table the way real users would: open it, scan it, run a spatial predicate, see if pruning fires.
 
 Each fixture has the same data: 10 geographically disjoint regions × 1000 points = 10,000 rows across 10 parquet files. A California-window predicate gives a clean signal — a fully-pruning engine should narrow to 1 file out of 10.
@@ -28,7 +28,7 @@ We graded each engine on a small ladder:
 | Engine | V3 native geometry |
 |---|---|
 | **Snowflake** (GA May 2026) | **L3 — works end-to-end.** Managed and externally-written paths both deliver correct spatial predicates *and* manifest geometry-bound pruning. The clear leader. |
-| **DuckDB 1.5.3** | **L2** — reads correctly; spatial predicates work with [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (in flight). File pruning is the next step. |
+| **DuckDB 1.5.6** | **L3** — reads correctly, spatial predicates work on the stock release, and manifest geometry-bound pruning fires on bbox predicates (`ST_Intersects_Extent` / `&&`; [PR #1030](https://github.com/duckdb/duckdb-iceberg/pull/1030)). Plain `ST_Intersects` is correct but full-scans. |
 | **BigQuery / BigLake, Dataproc Serverless 2.3, EMR Serverless 7.13** | **L0 — V3 available, no geometry/geography data type yet.** We verified all three read a non-geometry V3 fixture cleanly (10000 rows back). The geometry column is the specific implementation gap. The two Spark variants share one upstream `iceberg-spark-runtime` cause. |
 | **Sedona + Iceberg-Spark 1.7.1** | **L0** — same upstream `iceberg-spark-runtime` gap; also can't *write* V3 geometry (Sedona UDT mapper missing). |
 | **Databricks** | **L0** — `GEOMETRY/GEOGRAPHY` work in Delta, but the Iceberg-compat writer rejects them. Likely coming soon. |
@@ -48,11 +48,11 @@ Snowflake delivers Iceberg V3 geometry **end-to-end**, on both its managed write
 
 Two practical notes if you try this yourself: for managed tables, pass `ICEBERG_VERSION=3` explicitly (V2 is the default for new Iceberg tables, and the error if you forget doesn't hint at the opt-in). For queries, use `TO_GEOMETRY(wkt, 4326)` rather than bare `TO_GEOMETRY(wkt)` — the GEOM column is SRID 4326, and a bare envelope defaults to SRID 0 and fails the predicate with `Incompatible SRID: 4326 and 0`.
 
-### DuckDB — very close
+### DuckDB — there, with one ergonomic caveat
 
-DuckDB 1.5.3 reads V3 geometry correctly: the type parses, `ST_AsText(geom)` returns clean WKT. On stock 1.5.3 a spatial *predicate* crashes a manifest bound deserializer — we filed [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002), and the maintainer responded fast with [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013). We built it locally and verified the crash is gone — spatial predicates now return correct rows on both our fixture and Snowflake's own managed V3 table.
+DuckDB 1.5.3 read V3 geometry correctly — the type parsed, `ST_AsText(geom)` returned clean WKT — but a spatial *predicate* crashed a manifest bound deserializer. We filed [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002); the maintainer responded within days with [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (stop crashing), then [PR #1030](https://github.com/duckdb/duckdb-iceberg/pull/1030) (decode the V3 `packed_xy_le` bound and prune on it). Both ship in the stock release; we verified on **DuckDB 1.5.6** with no local build: `ST_Intersects` returns the right 1000 rows, and `ST_Intersects_Extent(geom, env)` (or `geom && env`) reads **1 of 10 files** on our fixture — and 2 of 7 on Snowflake's own managed V3 table, whose bounds were written by a different engine. Cross-engine V3 pruning, end to end.
 
-The PR deliberately *skips* decoding the geometry bound, so DuckDB falls back to a full scan rather than pruning on it — that's L2. Closing to L3 needs one more change: actually decoding the V3 `packed_xy_le` manifest bound and feeding it into the file-pruning predicate. The encoding is documented in the repo; the path from L2 to L3 is short.
+The caveat is ergonomic: the pruner only understands bbox-only predicates, and duckdb-spatial doesn't yet rewrite a plain `ST_Intersects` into one, so `ST_Intersects` alone still reads every file. Until that optimizer rule exists, write `ST_Intersects_Extent(geom, env) AND ST_Intersects(geom, env)` to get pruning and exact semantics. `geography` is still unmapped in `iceberg_scan` (the Parquet reader handles it fine).
 
 ## Brief notes on the rest
 
@@ -85,7 +85,7 @@ If you're picking a format for geospatial today:
 - **Files on disk → GeoParquet 2.0** (native Parquet geometry typing). Mature, broadly readable. Use it.
 - **A table you'll query through Snowflake → V3 directly.** Snowflake delivers the full pruning story end-to-end today, on both managed and externally-written V3. Ship it.
 - **A table you need many engines to read today → the V2 convention.** Flat bbox columns + WKB + `geo` table property. File-level pruning on every engine that reads V2 Iceberg. Bridge, not destination.
-- **A table you'll keep for years → V3 is the right target.** The architecture is sound (we proved it), DuckDB is one change away, Databricks is reportedly close, the rest will follow. If your timeline can absorb the engine catch-up, V3 is worth the wait.
+- **A table you'll keep for years → V3 is the right target.** The architecture is sound (we proved it), DuckDB is there, Databricks is reportedly close, upstream Spark has the type mapping merged, the rest will follow. If your timeline can absorb the engine catch-up, V3 is worth the wait.
 
 ## Why this matters
 

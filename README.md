@@ -25,9 +25,12 @@ is V3-spec-compliant in its snapshot block (`first-row-id` + `added-rows`) and
 populates per-file metrics (`value_counts`, `null_value_counts`, ID-column
 bounds) so Snowflake's manifest-bound pruner can evaluate spatial predicates.
 `testbed/v3_geometry.py` is that writer.
-Other engines aren't there yet: most reject the type at parse, and DuckDB
-reads correctly but doesn't prune on geometry bounds (PR [#1013](https://github.com/duckdb/duckdb-iceberg/pull/1013)
-fixes the crash but skips the bound decoder). For maximum portability today
+**DuckDB 1.5.6 joins it**: the stock release reads V3 geometry, evaluates
+spatial predicates correctly, and prunes on the manifest geometry bounds
+(1/10 files) when the predicate is a bbox test (`ST_Intersects_Extent` or
+`&&`) — plain `ST_Intersects` is correct but full-scans
+([duckdb-iceberg#1030](https://github.com/duckdb/duckdb-iceberg/pull/1030)). The other engines aren't there yet: they
+reject the type at parse. For maximum portability today
 the bridge is still a V2 convention — **GeoIceberg V2** ([SPEC.md](./SPEC.md))
 — flat `double` bbox columns + a WKB column + a `geo` table property, which
 gets file-level spatial pruning on every engine that reads Iceberg V2. Full
@@ -41,13 +44,13 @@ should prune to 1 file (196 rows).
 
 | Engine / version | V2 flat-bbox | V2 `bbox` struct | V3 native `geometry` |
 |---|---|---|---|
-| **DuckDB 1.5.3** | **L3** — prunes to 1/10 files | **L2** — correct, no struct-field pruning | **L2** — type + `ST_AsText(geom)` work (needs GeoParquet-2.0 native typing); spatial predicates now work via [duckdb-iceberg PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (open) — but full-scan, since the PR defers the geometry-bound deserializer. [#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002) |
+| **DuckDB 1.5.6** | **L3** — prunes to 1/10 files | **L2** — correct, no struct-field pruning | **L3** — stock release: typed readback, `ST_Intersects` correct (1000 rows), and manifest geometry-bound pruning to 1/10 files with `ST_Intersects_Extent` / `&&` ([duckdb-iceberg#1030](https://github.com/duckdb/duckdb-iceberg/pull/1030)). Plain `ST_Intersects` is correct but full-scans (no bbox pre-filter rewrite). `geography` still rejected by `iceberg_scan`. |
 | **BigQuery / BigLake** | **L3** | **L3** — prunes through struct fields too | **L0** — `Unknown Iceberg type "geometry(OGC:CRS84)"` |
 | **Snowflake** (GA May 2026) | **L3** (`bytes_scanned=0`) | **L3** | **L3 — managed *and* externally-written.** Spatial predicate correct + manifest geometry-bound pruning fires on both paths. Unmanaged read requires V3-spec snapshot fields + populated per-file metrics in our writer; no Snowflake-specific shape needed. |
 | **Sedona + Iceberg-Spark 1.7.1** | **L3** | **L3** | **L0** — type rejected at parse; can't *write* V3 geometry either (UDT mapper gap) |
 | **Databricks (DBSQL 2026.10)** | **L2** *via Snowflake federation* | **L2** *via federation* | **L0** — `GEOMETRY(SRID)`/`GEOGRAPHY(SRID)` work in *Delta*, not in its Iceberg-compat writer; likely coming soon |
 | **Oracle ADB 26ai** | **L0** | **L0** | **L0** — can't read our Iceberg tables at all (reader-side; see catalog track) |
-| **PyIceberg 0.11.1** | reads | reads | ⚠️ V3 read landed; no `GeometryType` writer ([iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818)) |
+| **PyIceberg 0.12.0** | reads | reads | ⚠️ `GeometryType`/`GeographyType` landed ([#2859](https://github.com/apache/iceberg-python/pull/2859)): V3 schema parses, file planning works — but `scan().to_arrow()` rejects the GeoParquet-2.0 `geoarrow.wkb` extension type; no V3 manifest writer ([#1818](https://github.com/apache/iceberg-python/issues/1818)) |
 
 Detail and per-capability breakdowns: **[STATUS_V2.md](./STATUS_V2.md)** (the V2
 convention) and **[STATUS_V3.md](./STATUS_V3.md)** (native V3).
@@ -57,10 +60,13 @@ convention) and **[STATUS_V3.md](./STATUS_V3.md)** (native V3).
 
 ### Two facts worth carrying away
 
-- **V3 geometry == GeoParquet 2.0 typing + Iceberg manifest bounds.** A V3
-  geometry column's data files must use the *native Parquet Geometry logical
-  type* (what GeoParquet 2.0 standardizes), not plain `BINARY` — DuckDB jumped
-  L0→L2 the moment we switched. The two specs are coupled.
+- **V3 geometry == native Parquet geometry typing + Iceberg manifest bounds.**
+  A V3 geometry column's data files must use the *native Parquet Geometry
+  logical type* — the foundation [GeoParquet 2.0](https://github.com/opengeospatial/geoparquet/releases/tag/v2.0.0-rc.1) is built on — not
+  plain `BINARY`; DuckDB jumped L0→L2 the moment we switched. The two specs
+  are coupled. (GeoParquet 2.0 conformance additionally needs the `geo`
+  footer metadata; our V3 data files carry it, so they double as
+  GeoParquet 2.0 files.)
 - **Flat bbox columns prune everywhere; a bbox *struct* doesn't.** DuckDB scans
   all 10 files on a `bbox.xmin` predicate; BigQuery/Sedona prune to 1. For
   portable Iceberg pruning today, use flat `double` columns. (This is why
@@ -115,9 +121,11 @@ get Snowflake reading the static catalog end-to-end. See
   ```
   gs://cartobq-iceberg-geo-testbed/{v2_flat_columns,v2_bbox_struct,v2_geo_convention,v3_geometry,v3_geography}/metadata/v1.metadata.json
   ```
-- **Bare parquet with parquet-format 2.11 logical types** — for testing a
-  *Parquet* reader without involving Iceberg at all, the data files stand
-  alone over plain HTTPS (no auth):
+- **Bare GeoParquet 2.0 files with parquet-format 2.11 logical types** — for
+  testing a *Parquet* reader without involving Iceberg at all, the data files
+  stand alone over plain HTTPS (no auth). They carry the native
+  `Geometry`/`Geography` logical types **and** the GeoParquet 2.0 `geo` footer
+  metadata (`version: "2.0.0"`; validated with `gpio check all`):
   ```
   https://storage.googleapis.com/cartobq-iceberg-geo-testbed/v3_geometry/data/<region>.parquet   # Geometry(crs=)
   https://storage.googleapis.com/cartobq-iceberg-geo-testbed/v3_geography/data/<region>.parquet  # Geography(crs=, algorithm=spherical)
@@ -139,7 +147,7 @@ manifest bounds.
 ```bash
 git clone https://github.com/jatorre/iceberg-geo-testbed
 cd iceberg-geo-testbed
-brew install duckdb              # ≥ 1.5.3
+brew install duckdb              # ≥ 1.5.6
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 

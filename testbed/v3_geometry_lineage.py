@@ -40,9 +40,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import geoarrow.pyarrow as ga
 from pyiceberg.schema import Schema
-from pyiceberg.types import BinaryType, NestedField, StringType
+from pyiceberg.types import GeometryType, NestedField, StringType
 
-from .common import REGIONS, packed_xy_le, stable_seed, wkb_point_le
+from .common import REGIONS, geoparquet_geo_metadata, packed_xy_le, stable_seed, wkb_point_le
 from ._static_catalog import write_static_catalog
 
 ROOT = Path(__file__).parent.parent / "data" / "v3_geometry_lineage"
@@ -59,7 +59,7 @@ def _field_meta(field_id: int) -> dict:
 
 PY_SCHEMA = Schema(
     NestedField(1, "id", StringType(), required=False),
-    NestedField(2, "geom", BinaryType(), required=False),
+    NestedField(2, "geom", GeometryType(), required=False),
 )
 
 GEOM_EXT_TYPE = ga.wkb().with_crs(ga.OGC_CRS84)
@@ -79,12 +79,14 @@ ARROW_SCHEMA = pa.schema(
 def _write_parquet(region, row_id_offset: int, sequence_number: int) -> Path:
     rng = random.Random(stable_seed(region.name))
     rows = 1000
-    ids, wkbs = [], []
+    ids, wkbs, xs, ys = [], [], [], []
     for i in range(rows):
         x = rng.uniform(region.xmin, region.xmax)
         y = rng.uniform(region.ymin, region.ymax)
         ids.append(f"{region.name}-{i}")
         wkbs.append(wkb_point_le(x, y))
+        xs.append(x)
+        ys.append(y)
     geom_arr = GEOM_EXT_TYPE.wrap_array(pa.array(wkbs, type=pa.binary()))
     row_ids = pa.array(range(row_id_offset, row_id_offset + rows), type=pa.int64())
     last_updated = pa.array([sequence_number] * rows, type=pa.int64())
@@ -96,6 +98,10 @@ def _write_parquet(region, row_id_offset: int, sequence_number: int) -> Path:
             "_last_updated_sequence_number": last_updated,
         },
         schema=ARROW_SCHEMA,
+    )
+    # GeoParquet 2.0 `geo` footer (per-file bbox); Iceberg ignores it.
+    table = table.replace_schema_metadata(
+        {"geo": geoparquet_geo_metadata("geom", xs=xs, ys=ys)}
     )
     out_dir = ROOT / "data"
     out_dir.mkdir(parents=True, exist_ok=True)

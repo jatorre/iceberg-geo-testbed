@@ -1,6 +1,9 @@
 # Iceberg V3 native geometry — engine support status
 
-**Last verified: 2026-05-28.** Living document; PRs welcome.
+**Last verified: 2026-10-09** for DuckDB (1.5.6), PyIceberg and GeoParquet 2.0
+conformance of the fixtures; BigQuery 2026-09-21. The Snowflake, Databricks, Oracle and
+Spark rows were last run 2026-05-28; each row states its own date and evidence.
+Living document; PRs welcome.
 
 Part of the **geo track**. This table tracks each engine's implementation status
 against the native V3 geometry/geography types defined in the
@@ -50,12 +53,22 @@ The shared properties of these fixtures:
   files, `first_row_id` on the manifest-list entry, and the
   `iceberg.schema` metadata key Snowflake-managed V3 emits.
 - **Parquet data files use the native parquet-format 2.11 logical
-  types** via `geoarrow-pyarrow` (GeoParquet 2.0 style) — `Geometry(crs=)`,
-  or `Geography(crs=, algorithm=spherical)` for `v3_geography` — with
+  types** via `geoarrow-pyarrow` — `Geometry(crs=)`, or
+  `Geography(crs=, algorithm=spherical)` for `v3_geography` — with
   WKB-encoded point payloads. Same column-level encoding Snowflake's own
   managed V3 writer produces.
-  Because the data files carry the logical type on their own, they are
-  also usable as **bare parquet conformance files**, with no Iceberg
+- **…and are conformant GeoParquet 2.0 files.** [GeoParquet 2.0.0-rc.1](https://github.com/opengeospatial/geoparquet/releases/tag/v2.0.0-rc.1)
+  (2026-07-19) makes those native types its foundation but still requires
+  the `geo` footer key for conformance; a native-types-only file is
+  "parquet-geo-only", readable by 2.0 readers but not conformant. Since
+  2026-09-22 each data file carries `geo` metadata (`version: "2.0.0"`,
+  `encoding: "WKB"`, `geometry_types: ["Point"]`, per-file `bbox`, and
+  `edges: "spherical"` on `v3_geography`; `crs` omitted so the OGC:CRS84
+  default matches the absent Parquet `crs`). `gpio check all` passes.
+  Iceberg readers ignore this footer key, so nothing changes on the
+  Iceberg side.
+  Because the data files carry both layers on their own, they are also
+  usable as **bare GeoParquet 2.0 conformance files**, with no Iceberg
   metadata involved:
   `https://storage.googleapis.com/cartobq-iceberg-geo-testbed/{v3_geometry,v3_geography}/data/<region>.parquet`
 - Per-file geometry bounds in the `packed_xy_le` encoding (16 bytes:
@@ -73,7 +86,8 @@ file against the engine vendor, not against this testbed.
 The engine table below tracks `geometry` only. The `v3_geography` twin
 buys a sharper diagnosis, because it isolates *which layer* of an engine
 lacks geography support — the parquet logical type or the Iceberg type
-token. First result, DuckDB 1.5.3 (2026-08-05):
+token. First result, DuckDB 1.5.3 (2026-08-05); re-verified unchanged on
+DuckDB 1.5.6 (2026-10-09):
 
 | Path | `v3_geometry` | `v3_geography` |
 |---|---|---|
@@ -82,22 +96,31 @@ token. First result, DuckDB 1.5.3 (2026-08-05):
 
 Same bytes on disk in both columns of that table — so DuckDB's geography
 gap lives entirely in its Iceberg type mapping. Its Parquet reader already
-does the right thing. That's a much more actionable bug report than
+does the right thing.
+
+One writer-side asymmetry to know about: pyarrow 25.0.1 emits row-group
+`GeospatialStatistics` (the parquet-format 2.11 bbox) for the `GEOMETRY`
+column but **none** for the `GEOGRAPHY` column. So a bare-Parquet reader
+gets row-group bbox pruning on `v3_geometry` and not on `v3_geography`;
+the Iceberg manifest bounds are unaffected (we write those ourselves). That's a much more actionable bug report than
 "geography doesn't work," and it's only visible because the two fixtures
 are byte-identical apart from the annotation.
 
 ### Cross-engine V3 interop verified
 
 DuckDB reads **Snowflake's own managed V3 table** at exactly the same
-level (L2) it reads our hand-written V3 fixture — same COUNT/SELECT/
-ST_AsText results, same `ST_Intersects` bound-deserializer crash.
-That's strong evidence that:
+level it reads our hand-written V3 fixture — same COUNT/SELECT/
+ST_AsText results; on 1.5.3 the same `ST_Intersects` bound-deserializer
+crash, and on 1.5.6 the same manifest geometry-bound pruning with
+`ST_Intersects_Extent` (1/10 files on ours, 2/7 on Snowflake's — its
+files aren't region-aligned). That's strong evidence that:
 
 - Our catalog's V3 metadata + manifest avro + parquet structure is
   equivalent to Snowflake's for the parts DuckDB exercises.
-- DuckDB's bound-deserializer gap is engine-side (same line of code
-  fails whether the V3 table was written by us or by Snowflake) —
-  filing it against `duckdb-iceberg` is the right move.
+- DuckDB's (former) bound-deserializer gap was engine-side (same line
+  of code failed whether the V3 table was written by us or by
+  Snowflake). We filed it as [#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002); [PR #1030](https://github.com/duckdb/duckdb-iceberg/pull/1030)
+  decodes the `packed_xy_le` bounds from both writers identically.
 
 The Snowflake-managed V3 table lives at
 `gs://cartobq-iceberg-geo-testbed-eu/managed-v3-geo.MLyhYkeQ/` and is
@@ -135,7 +158,8 @@ Verified results (same as direct GCS URL path):
 - `DESCRIBE` returns `ID varchar`, `GEOM geometry('ogc:crs84')`
 - `COUNT(*) = 10000`
 - `SELECT ST_AsText(GEOM)` materializes proper POINT geometries
-- `WHERE ST_Intersects(GEOM, …)` hits the same bound-deser crash
+- `WHERE ST_Intersects(GEOM, …)` hits the same bound-deser crash (on
+  1.5.3; the Horizon path was not re-run on 1.5.6 — needs Snowflake creds)
 
 Two ways DuckDB can reach Snowflake's V3 data, both at L2. Either
 counts as cross-engine V3 interop.
@@ -190,8 +214,8 @@ Cell values:
 
 | Engine / version | N1 type recognized | N2 column readback | N3 predicate correct | N4 manifest geometry-bound pruning | W1 write V3 tables |
 |---|---|---|---|---|---|
-| **DuckDB 1.5.3** | ✅ — schema parses, `COUNT(*)` works | ✅ — typed `geometry('ogc:crs84')` materializes; `ST_AsText(geom)` returns WKT cleanly. **Cross-verified at L2 against both our hand-written V3 fixture AND Snowflake's own managed V3 table** — proves cross-engine V3 interop works at this level. The earlier "BLOB→GEOMETRY cast missing" finding was caused by our parquet writing geom as plain BINARY; once we promoted to GeoParquet 2.0 native `Geometry(crs=)` typing, DuckDB reads it directly without the cast. | ✅ **via [duckdb-iceberg PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (open, base `v1.5-variegata`).** The fix short-circuits `IcebergPredicateStats::DeserializeBounds` for `GEOMETRY` and returns empty stats — the crash stops and the spatial predicate now returns correct rows. Verified by building the PR locally: `WHERE ST_Intersects(geom, ST_MakeEnvelope(...))` returns the right count on both our hand fixture and Snowflake's managed V3. *Without* the patch DuckDB 1.5.3 still crashes (`IcebergValue::DeserializeValue` has no `GEOMETRY` branch). See [duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002). | ❌ — **explicitly deferred by PR #1013**. The fix discards geometry bounds rather than decoding them (in-source comment: *"DuckDB-Iceberg does not yet support deserializing avro blobs to geometry yet"*). EXPLAIN ANALYZE confirms full scan: 10/10 files on the hand fixture, 7/7 on Snowflake-managed V3 — no pruning fires on geometry bounds. | ❓ — not tested |
-| **BigQuery / BigLake** (2026-05) | ❌ on geometry — `Unknown Iceberg type "geometry(OGC:CRS84)"` at `CREATE EXTERNAL TABLE`. **V3 reader itself works**: `CREATE EXTERNAL TABLE … OPTIONS(format='ICEBERG', uris=['…v3_minimal/metadata/v1.metadata.json'])` against a V3-minimal fixture (no geometry, just `id` STRING + `n` INT) returns `COUNT(*) = 10000`. So the gap is geometry-specific, not V3-format. | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `GEOGRAPHY` type also explicitly unsupported per [icebergmatrix.org](https://icebergmatrix.org/) |
+| **DuckDB 1.5.6** (iceberg extension `890b78a9c`, spatial `04270fe`; 2026-10-09) | ✅ — schema parses, `COUNT(*)` works (unchanged since 1.5.3). `geography` is still rejected: `Not implemented Error: Geography support`. | ✅ — typed `geometry` materializes; `ST_AsText(geom)` returns WKT cleanly. **Cross-verified against both our hand-written V3 fixture AND Snowflake's own managed V3 table.** (The earlier "BLOB→GEOMETRY cast missing" finding was our parquet writing geom as plain BINARY; GeoParquet 2.0 native `Geometry(crs=)` typing fixed it.) | ✅ **on the stock release** — no local build needed anymore. `WHERE ST_Intersects(geom, ST_MakeEnvelope(-125, 32, -115, 42))` returns 1000 on our fixture and on Snowflake's managed V3. The 1.5.3 crash ([#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002)) was closed upstream on 2026-09-01 after [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (stop crashing) and [PR #1030](https://github.com/duckdb/duckdb-iceberg/pull/1030) (decode the bounds). | ✅ **with a bbox predicate.** [PR #1030](https://github.com/duckdb/duckdb-iceberg/pull/1030) (merged 2026-06-10, in the stock extension) decodes the `packed_xy_le` bounds into a `GeometryStats` extent and prunes via `GeometryStats::CheckZonemap`. `ST_Intersects_Extent(geom, env)` or `geom && env` → `Total Files Read: 1` of 10 on `v3_geometry` and on `v3_geometry_lineage`; 2/7 on Snowflake's managed V3 (its files aren't region-aligned). **Caveat:** plain `ST_Intersects` is *not* rewritten into a bbox pre-filter (no such optimizer rule in duckdb-spatial 1.5.6), so it full-scans (10/10, 7/7). `ST_Intersects_Extent(...) AND ST_Intersects(...)` gives pruning **and** exact semantics (verified: 1/10 files, 1000 rows). | ❓ — PR #1030 also writes geometry bounds on `INSERT` into a catalog-attached table; not exercised in this testbed |
+| **BigQuery / BigLake** (2026-05; re-verified 2026-09-21) | ❌ on geometry — `Unknown Iceberg type "geometry(OGC:CRS84)"` at `CREATE EXTERNAL TABLE` (2026-05); still ❌ on 2026-09-21 with the bare tokens: `Unknown Iceberg type "geometry"` on `v3_geometry`, `Unknown Iceberg type "geography"` on `v3_geography`. **V3 reader itself works**: `CREATE EXTERNAL TABLE … OPTIONS(format='ICEBERG', uris=['…v3_minimal/metadata/v1.metadata.json'])` against a V3-minimal fixture (no geometry, just `id` STRING + `n` INT) returns `COUNT(*) = 10000`. So the gap is geometry-specific, not V3-format. | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `GEOGRAPHY` type also explicitly unsupported per [icebergmatrix.org](https://icebergmatrix.org/) |
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | ❌ — `Cannot parse type string to primitive: geometry(OGC:CRS84)` on `spark.read.format('iceberg').load(...)` | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — `iceberg-spark-runtime` rejects Sedona's Geometry UDT: `java.lang.UnsupportedOperationException: User-defined types are not supported at SparkTypeVisitor.visit`. Even the reference V3 toolchain can't write native geometry today. |
 | **Dataproc Serverless 2.3** (Spark 3.5.3, GCP) | ❌ on geometry — bundled `iceberg-spark-runtime` raises `UnsupportedOperationException: Cannot convert unknown type to Spark: geometry`. **V3 reader works**: `spark.read.format("iceberg").load(…v3_minimal…)` returns 10000 rows with a clean `id:string, n:int` schema. So Dataproc has shipped V3; the gap is geometry-specific. | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❓ |
 | **EMR Serverless 7.13** (Spark 3.5.6-amzn-2, AWS) | ❌ on geometry — same `UnsupportedOperationException: Cannot convert unknown type to Spark: geometry`. **V3 reader works**: same `spark.read.format("iceberg").load(…v3_minimal…)` returns 10000 rows. icebergmatrix.org lists "EMR (8.0 Spark): Full" for V3 Geometry, but `emr-8.x` doesn't exist in `aws emr list-release-labels` (latest is `emr-7.13.0`) — that cell is forward-looking; the testable EMR today is L0 on geometry but does have a working V3 reader for other types. | ❌ — blocked by N1 | ❌ — blocked by N1 | ❌ — blocked by N1 | ❓ |
@@ -199,7 +223,7 @@ Cell values:
 | **Databricks (DBSQL 2026.10)** | ❌ in Iceberg — but precisely (verified 2026-05-26): `GEOMETRY(SRID)`/`GEOGRAPHY(SRID)` **work in Delta**, while the Iceberg-compat writer rejects them (`DELTA_ICEBERG_WRITER_COMPAT_VIOLATION`, `IcebergWriterCompatV1`/`V3`). Databricks "Iceberg" = Delta + an Iceberg-compat writer, so geo stops at that boundary. Geo-in-Iceberg is **likely coming soon** (not available 2026-05-26); re-test periodically. | ❌ | ❌ | ❌ | ❌ |
 | **Oracle ADB 26ai (23.26.2.2.0)** | ❌ — blocked upstream of V3: Oracle can't read *any* of our Iceberg tables (V2 or V3), including Snowflake's own Spark-lineage output — `ORA-20000: Failed to generate column list` (see V2 status, updated 2026-05-26). Ruled out storage (fails on both GCS-public and S3-credentialed), producer, and metrics — it's Oracle's Iceberg reader itself. Can't isolate the V3 geometry question until Oracle reads our Iceberg at all. | ❌ | ❌ | ❌ | ❓ — not in icebergmatrix.org's coverage |
 | **Apache Polaris** (reference REST catalog) | ✅ — registers V3 tables via `POST .../register` once metadata includes the required `next-row-id` and `row-lineage` fields (caught a real pyiceberg 0.11.1 gap we patched in `testbed/_static_catalog.py`) | n/a — Polaris is a catalog, not a query engine | n/a | n/a | n/a |
-| **PyIceberg 0.11.1** | ⚠️ — V3 metadata read landed but `GeometryType` writer is missing; tracked at [iceberg-python#1818](https://github.com/apache/iceberg-python/issues/1818) | ⚠️ — returns the column as Arrow `binary`, no typed geometry | n/a (library) | n/a | ❌ |
+| **PyIceberg 0.12.0** (2026-09-01) | ✅ — `GeometryType` / `GeographyType` landed ([#2859](https://github.com/apache/iceberg-python/pull/2859)); `StaticTable.from_metadata` parses all three V3 fixtures (`geom: GeometryType()`, `geog: GeographyType()`) and plans their 10 files. V3 tracking issue [#1818](https://github.com/apache/iceberg-python/issues/1818) is still open. | ❌ — `scan().to_arrow()` fails with `UnsupportedPyArrowTypeException: Column 'geom' has an unsupported type: extension<geoarrow.wkb<WkbType>>` — the GeoParquet-2.0 files carry a `geoarrow.wkb` Arrow extension type (registered as soon as `geoarrow-pyarrow` is importable) that pyiceberg's Arrow→Iceberg schema visitor doesn't accept. `v3_minimal` (no geometry) reads fine. | n/a (library) | n/a | ❌ — `write_manifest()` / `write_manifest_list()` still reject `format_version=3`; the V3 writer subclasses in `testbed/_static_catalog.py` remain necessary |
 | **OSS Spark 4.1 / Flink 2.2** (not in this testbed) | ❓ | ❓ | ❓ | ❓ | ❓ — per icebergmatrix.org: *"V3 geometry type support is not yet documented"* |
 
 ## What this picture tells you
@@ -219,16 +243,25 @@ As of mid-2026:
   `null_value_counts` + ID-column bounds in the manifest. Bisection
   ruled out everything else (no Snowflake-internal lineage cols, no
   uppercase columns, no `last-column-id` bumps).
-- **DuckDB jumped from N1 to N2** when we upgraded our V3 parquet
-  files to use the native `Geometry(crs=)` logical type
-  (GeoParquet 2.0). The earlier BLOB→GEOMETRY cast gap turned out
-  to be a fix-the-catalog issue, not a fix-the-engine issue.
-  **N3 unlocks with `duckdb-iceberg` PR #1013** (verified locally
-  2026-05-28): the spatial predicate no longer crashes and returns
-  correct rows. N4 (manifest geometry-bound pruning) is still
-  outstanding — that PR deliberately defers the bound deserializer,
-  so DuckDB falls back to a full scan; it would be the next
-  follow-up to close the gap to L3.
+- **DuckDB 1.5.6 delivers N1–N4 on the stock release.** N2 came when
+  we upgraded our V3 parquet files to the native `Geometry(crs=)`
+  logical type (GeoParquet 2.0) — a fix-the-catalog issue, not a
+  fix-the-engine one. N3 landed with [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) (stop
+  crashing) and N4 with [PR #1030](https://github.com/duckdb/duckdb-iceberg/pull/1030) (decode the
+  `packed_xy_le` bounds), both in the stock extension. The remaining
+  rough edge is ergonomic: pruning fires only on bbox predicates
+  (`ST_Intersects_Extent`, `&&`); a plain `ST_Intersects` is correct
+  but full-scans until duckdb-spatial derives a bbox pre-filter from
+  it. `geography` is still unmapped in `iceberg_scan`.
+- **Upstream Spark has shipped geometry.** [Apache Iceberg
+  1.12.0](https://github.com/apache/iceberg/releases/tag/apache-iceberg-1.12.0)
+  (2026-09-30) includes Spark 4.1 geometry type mapping and Parquet
+  read/write ([#16851](https://github.com/apache/iceberg/pull/16851),
+  [#17073](https://github.com/apache/iceberg/pull/17073)) and Parquet
+  geometry bounding-box metrics
+  ([#17161](https://github.com/apache/iceberg/pull/17161)). The Sedona /
+  Dataproc / EMR rows above were measured on 1.11.0 and predate it;
+  re-test them on an `iceberg-spark-runtime` 1.12.0.
 - **Other engines** (BigQuery, Sedona/Iceberg-Spark, Databricks)
   reject the V3 geometry type at parse, before reaching N2.
 - **W1 outside of Snowflake**: Sedona/Iceberg-Spark — the supposed
@@ -238,9 +271,9 @@ As of mid-2026:
   geometry writer we found.
 
 This is the empirical reason [**STATUS_V2.md**](./STATUS_V2.md) and
-the [**GeoIceberg V2 spec**](./SPEC.md) exist. The V3 story is *just*
-beginning to ship in one engine (Snowflake managed). Until it spreads,
-the V2 convention bridges the gap.
+the [**GeoIceberg V2 spec**](./SPEC.md) exist. The V3 story now ships
+end-to-end in two engines (Snowflake, and DuckDB 1.5.6). Until it
+spreads to the rest, the V2 convention bridges the gap.
 
 ## What each cell would need to flip
 
@@ -257,30 +290,29 @@ tokens. Engines vary in how strict this is:
 
 ### **N2 column readback**
 
-For DuckDB specifically: the missing `BLOB → GEOMETRY('OGC:CRS84')`
-cast in the parquet reader path. Likely a small PR against
-`duckdb-spatial` or `duckdb-iceberg`. The
-[issue we filed](https://github.com/duckdb/duckdb-iceberg/issues/1002)
-covers both N2 and N3.
+DuckDB: **done.** The apparent missing `BLOB → GEOMETRY` cast was our
+parquet files declaring plain `BINARY`; with GeoParquet-2.0 native
+`Geometry(crs=)` typing DuckDB reads the column directly. The
+[issue we filed](https://github.com/duckdb/duckdb-iceberg/issues/1002) is closed.
 
 ### **N3 spatial predicate correctness**
 
-DuckDB: **landed in [PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013)**
-(open against `v1.5-variegata`). The fix bypasses bound deserialization
-for `GEOMETRY` columns in `IcebergPredicateStats::DeserializeBounds`,
-so spatial predicates evaluate correctly (returning empty stats means
-DuckDB cannot prune, but it cannot crash either). Verified end-to-end
-on hand and Snowflake-managed V3 fixtures.
+DuckDB: **shipped; verified on 1.5.6** ([PR #1013](https://github.com/duckdb/duckdb-iceberg/pull/1013) then [PR #1030](https://github.com/duckdb/duckdb-iceberg/pull/1030)).
+Spatial predicates evaluate correctly on the stock release — verified
+end-to-end on the hand fixture and on Snowflake-managed V3.
 
 ### **N4 manifest geometry-bound pruning**
 
-The headline V3 feature. PR #1013 explicitly defers this work — its
-fix returns empty stats for geometry bounds rather than decoding them,
-so DuckDB cannot prune on geometry bounds yet. The proper deserializer
-needs to handle the V3 `packed_xy_le` encoding (16-byte LE-double X,Y
-pair — see [docs/encoding.md](docs/encoding.md)) and feed `(xmin, ymin,
-xmax, ymax)` bounds into the file-pruning predicate. Tracked at
-[duckdb-iceberg#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002).
+The headline V3 feature. DuckDB: **shipped; verified on 1.5.6** via
+[PR #1030](https://github.com/duckdb/duckdb-iceberg/pull/1030) — the V3 `packed_xy_le` encoding (16-byte LE-double
+X,Y pair — see [docs/encoding.md](docs/encoding.md)) is decoded into a
+`GeometryStats` extent and evaluated by `GeometryStats::CheckZonemap`.
+What's left is ergonomics: the zonemap check whitelists the bbox-only
+predicates (`&&`, `ST_Intersects_Extent`), and duckdb-spatial has no
+optimizer rule that derives one from `ST_Intersects`, so a plain
+`ST_Intersects` still reads every file. Two follow-ups worth filing:
+an `ST_Intersects → bbox pre-filter` rewrite (duckdb-spatial), and the
+`geography` type mapping in `iceberg_scan` (duckdb-iceberg).
 
 ### **W1 write V3 tables**
 
@@ -411,3 +443,46 @@ to the changelog.
   was based on the incorrect requirement and is no longer needed.)
   Reframes the Snowflake row from "managed-only" to "managed +
   unmanaged" at N1–N4.
+- **2026-09-22** — Checked the fixtures against **GeoParquet 2.0.0-rc.1**
+  ([released 2026-07-19](https://github.com/opengeospatial/geoparquet/releases/tag/v2.0.0-rc.1)). The RC makes the native Parquet
+  `GEOMETRY`/`GEOGRAPHY` logical types its foundation (what we already
+  wrote) but still requires the `geo` footer key for conformance; our
+  files were "parquet-geo-only". The three V3 writers now emit the `geo`
+  metadata (per-file `bbox`, `edges: "spherical"` on geography) and
+  `gpio check all` passes on the rebuilt files. Iceberg-side results are
+  unchanged (DuckDB runner 5/5, pyiceberg parses). Also noted: the RC
+  dropped the 1.1 `covering` bbox column and a post-RC change
+  ([#302](https://github.com/opengeospatial/geoparquet/pull/302), 2026-09-07) brought it back as optional for
+  page-level pruning — see SPEC.md. pyarrow writes row-group geo
+  statistics for `GEOMETRY` only, not `GEOGRAPHY`.
+- **2026-10-09** — Re-verified on **DuckDB 1.5.6** (2026-09-28; iceberg
+  extension `890b78a9c`, which includes [PR #1030](https://github.com/duckdb/duckdb-iceberg/pull/1030), merged 2026-06-10;
+  spatial `04270fe`). DuckDB N3 ✅ on the stock release (no local
+  build), N4 ✅ with `ST_Intersects_Extent` / `&&`, alone or combined
+  with `ST_Intersects` (1/10 files on `v3_geometry` and
+  `v3_geometry_lineage`, 2/7 on Snowflake-managed V3); plain
+  `ST_Intersects` still full-scans (10/10, 7/7): 1.5.6 pushes it into
+  the `ICEBERG_SCAN` filters, but the zonemap check only understands
+  bbox predicates and no bbox pre-filter is derived from it — over HTTP
+  it fetches all 10 data files (~187 KB) vs 1 file (~19 KB) for the
+  extent predicate. **DuckDB V3 geometry moves L2 → L3.** Upstream
+  closed [#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002) on 2026-09-01. Geography unchanged:
+  `iceberg_scan` still fails with `Not implemented Error: Geography
+  support`, while `read_parquet` types it `GEOMETRY` and returns the
+  1000 California rows. **PyIceberg 0.12.0** (2026-09-01) adds
+  `GeometryType` / `GeographyType` — parses our V3 fixtures and plans
+  files, but `to_arrow()` rejects the `geoarrow.wkb` extension type
+  (now tracked in [apache/iceberg-python#4079](https://github.com/apache/iceberg-python/issues/4079); a Snowflake-written V3 table fails the same way);
+  `write_manifest()` still rejects `format_version=3`, so the V3
+  writer subclasses in `testbed/_static_catalog.py` stay. The fixture
+  writers now declare `GeometryType()` / `GeographyType()` directly
+  (requires pyiceberg ≥ 0.12.0); fixtures rebuild byte-identical under
+  pyiceberg 0.12.0 / pyarrow 25.0.1 / geoarrow-pyarrow 0.3.0. `gpio
+  check spec` (geoparquet-io 1.6.0) passes 34/34 on all 30 V3 files
+  (geography files carry the expected "missing geospatial statistics"
+  warning). **Apache Iceberg 1.12.0** (2026-09-30) ships the Spark 4.1
+  geometry work — the Spark rows are now re-testable. **BigQuery**
+  re-tested 2026-09-21: still `Unknown Iceberg type "geometry"` /
+  `"geography"` at `CREATE EXTERNAL TABLE` (release notes show no V3
+  geo change since). Snowflake / Databricks / Oracle rows not re-run
+  (no credentials on the verifying machine).

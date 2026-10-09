@@ -1,6 +1,9 @@
 # GeoIceberg V2 — engine support status
 
-**Last verified: 2026-05-28.** Living document; PRs welcome.
+**Last verified: 2026-10-09** for DuckDB (1.5.6) and PyIceberg; BigQuery
+2026-09-21. The Snowflake,
+Databricks, Oracle and Sedona rows were last run 2026-05-28; each row states its
+own date and evidence. Living document; PRs welcome.
 
 Part of the **geo track** (see [STATUS_V3.md](./STATUS_V3.md) and
 [SPEC.md](./SPEC.md)). This table tracks each engine's implementation status
@@ -60,14 +63,14 @@ Cell values:
 
 | Engine / version | R1 static metadata | R2 bbox-col pruning | R3 WKB readback | R4 `geo` property visible | O1 auto-derive from `ST_Intersects` |
 |---|---|---|---|---|---|
-| **DuckDB 1.5.3** | ✅ | ✅ — 1/10 files on California probe | ✅ — `ST_GeomFromWKB(geom_wkb)` returns POINT geometries | ❓ — `iceberg_scan()` doesn't expose table properties by default | ❌ — confirmed via Q3 in the testbed |
+| **DuckDB 1.5.6** (verified 2026-10-09; identical on 1.5.3) | ✅ | ✅ — 1/10 files on California probe | ✅ — `ST_GeomFromWKB(geom_wkb)` returns POINT geometries | ❓ — `iceberg_scan()` doesn't expose table properties by default | ❌ — confirmed via Q3 in the testbed |
 | **BigQuery / BigLake** (2026-05) | ✅ — `CREATE EXTERNAL TABLE … OPTIONS(format='ICEBERG', uris=[…])` | ✅ — `total_bytes_processed` matches single-file scan | ✅ — `ST_GEOGFROMWKB(geom_wkb)` (note: returns GEOGRAPHY, not GEOMETRY) | ❓ | ❌ — same as GeoParquet's current state |
 | **Sedona 1.6.1 + Iceberg-Spark 1.7.1** | ✅ — via Spark's `read.format('iceberg').load(metadata_path)` | ✅ — distinct `input_file_name()` = 1 | ✅ — `ST_GeomFromWKB(geom_wkb)` returns Sedona Geometry | ❓ | ❌ |
 | **Snowflake 10.19.100 (GCP_EUROPE_WEST2)** | catalog-only — requires `EXTERNAL VOLUME` + `CATALOG INTEGRATION` with `CATALOG_SOURCE = OBJECT_STORE`. *Key gotcha:* the GCS service account needs `storage.buckets.get` (via `roles/storage.legacyBucketReader`) in addition to `objectAdmin`, otherwise `CREATE ICEBERG TABLE` fails with the misleading `091369: Query needs to be retried to setup external volume`. `SYSTEM$VERIFY_EXTERNAL_VOLUME` doesn't catch this, and `ICEBERG_ACCESS_ERRORS` doesn't log it. Snowflake support confirmed; documented in [engines/snowflake/README.md](engines/snowflake/README.md). | ✅ — verified L3 on all three V2 fixtures (`v2_flat_columns`, `v2_bbox_struct`, `v2_geo_convention`); `bytes_scanned=0` because Snowflake answers `COUNT(*)` with bbox predicate from the manifest's `record_count` directly (no parquet read needed) | ✅ — `geom_wkb` exposes as BINARY; `TO_GEOMETRY(geom_wkb)` materializes points | ❓ — needs explicit `SHOW TBLPROPERTIES` test | ❓ |
 | **Databricks (DBSQL 2026.10)** | catalog-only — no generic Iceberg-REST connector **by design** (certified per-partner connectors only, demand-driven; conformance alone isn't sufficient) and no static-metadata path. ✅ **reachable via `CREATE CONNECTION TYPE snowflake`** against a Snowflake-managed V2 table (2026-05-26); query federation only — the direct-from-GCS read falls back to JDBC because Databricks rejects Snowflake-on-GCP's `gcs://` metadata scheme (accepts only `gs://`) | ✅ — federated bbox predicate returns 196, matches Snowflake | ✅ — `st_geomfromwkb(geom_wkb)` parses WKB to typed POINTs; `st_intersects` correct (=1000) | ❓ | ❓ |
 | **Oracle ADB 26ai** | ❌ — `DBMS_CLOUD.CREATE_EXTERNAL_TABLE` fails with `ORA-20000: Failed to generate column list`. **Updated 2026-05-26:** ruled out metrics (added them, no change), producer (**Snowflake's own Spark-lineage metadata fails identically**), and **storage** (staged to S3 with a working IAM credential — `LIST_OBJECTS` succeeds — but the Iceberg read still fails identically). So it's Oracle's Iceberg metadata reader itself, not storage/auth/producer/metrics. | ❌ — blocked by R1 | ❓ | ❓ | ❓ |
 | **Apache Polaris** (reference REST catalog) | ✅ — registers via `POST /api/catalog/v1/{cat}/namespaces/{ns}/register` with a `metadata-location` pointing at our GCS metadata.json | n/a — Polaris is a catalog, not a query engine | n/a | n/a — Polaris exposes the property to client engines | n/a |
-| **PyIceberg 0.11.1** | ✅ — `pyiceberg.io.pyarrow.PyArrowFileIO` reads V2 metadata | ❓ — needs explicit row-filter test | ✅ — returns the WKB column as Arrow `binary` | ❓ | n/a (library, not a query planner) |
+| **PyIceberg 0.12.0** (2026-09-21) | ✅ — `StaticTable.from_metadata` reads V2 metadata | ✅ — `scan(row_filter=<California bbox>)` plans 1/10 files and returns 196 rows on `v2_flat_columns` **and** on `v2_bbox_struct` (struct-field bounds prune too, unlike DuckDB) | ✅ — returns the WKB column as Arrow `binary` | ✅ — `table.properties["geo"]` is a plain dict lookup | n/a (library, not a query planner) |
 
 \*Engines marked **catalog-only** in R1 may still implement R2–R4
 correctly once tables are registered through their supported catalog
@@ -152,3 +155,10 @@ change.
   the static-catalog + CDN/Worker work) moved to the new
   [STATUS_CATALOG.md](./STATUS_CATALOG.md). This file stays focused on the
   V2 geo convention's capabilities.
+- **2026-10-09** — Re-verified DuckDB on 1.5.6 (iceberg `890b78a9c`):
+  1/10 flat, 10/10 struct, 1/10 on `v2_geo_convention` bbox columns,
+  `ST_GeomFromWKB` returns points, `ST_Intersects` alone 10/10 (O1) —
+  unchanged since 1.5.3. Static-catalog `ATTACH` path re-verified.
+  PyIceberg row bumped to 0.12.0 with the R2 row-filter test now run
+  (1/10 on both flat and struct). No cell changes on the other engines
+  (not re-run: no credentials on the verifying machine).

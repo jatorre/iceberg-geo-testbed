@@ -82,9 +82,9 @@ def _build_snapshot_block(
     return block
 
 
-# pyiceberg 0.11.1 has manifest schemas defined for V1/V2/V3 but the
-# write_manifest() / write_manifest_list() entrypoints explicitly reject
-# version=3. We unblock V3 writes by subclassing the V2 writers and just
+# pyiceberg (0.11.1, and still 0.12.0) has manifest schemas defined for
+# V1/V2/V3 but the write_manifest() / write_manifest_list() entrypoints
+# explicitly reject version=3. We unblock V3 writes by subclassing the V2 writers and just
 # overriding the version property. The schemas keyed off `self.version`
 # (V3 manifest entry schemas include the V3-only `first_row_id` field
 # on data files; V3 manifest-list entries include `first_row_id` too).
@@ -92,12 +92,14 @@ class _ManifestWriterV3(ManifestWriterV2):
     def __init__(self, *args, schema_override_json: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         # Lets the caller swap in a custom schema JSON string for the
-        # avro metadata. Needed for V3 GEOMETRY columns because
-        # pyiceberg's PrimitiveType model has no GeometryType, so the
-        # Python schema falls back to BinaryType — and that "binary"
-        # type token then appears in the manifest avro metadata,
-        # contradicting the table's claim that the column is geometry.
-        # Snowflake reads this and rejects.
+        # avro metadata. Originally required because pyiceberg < 0.12.0
+        # had no GeometryType: the Python schema fell back to BinaryType
+        # and that "binary" token leaked into the manifest avro metadata,
+        # contradicting the table's claim that the column is geometry
+        # (Snowflake reads this and rejects). pyiceberg 0.12.0 now
+        # serializes GeometryType as the same bare "geometry" token, so
+        # this is belt-and-braces — kept so the manifest's `schema` key is
+        # byte-for-byte the metadata.json `fields` list.
         self._schema_override_json = schema_override_json
 
     @property

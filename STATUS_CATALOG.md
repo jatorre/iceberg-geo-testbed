@@ -1,6 +1,9 @@
 # Iceberg catalog interoperability — engine support status
 
-**Last verified: 2026-05-28.** Living document; PRs welcome.
+**Last verified: 2026-10-09** for DuckDB (1.5.6) and the GCS / S3 / CloudFront /
+Worker fronts; BigQuery 2026-09-21. The Snowflake, Databricks, Oracle and Glue rows were last run
+2026-05-28; each row states its own date and evidence. Living document; PRs
+welcome.
 
 This is the **catalog track** of the testbed. It asks a question separate from
 geospatial: *can you publish a public Apache Iceberg dataset that any engine can
@@ -60,7 +63,7 @@ warehouse can't read a public static catalog directly.
 
 | Engine | (A) Consume IRC catalog | (B) Per-table `metadata.json` | Notes |
 |---|---|---|---|
-| **DuckDB 1.5.3** | ✅ `ATTACH … (TYPE iceberg, AUTHORIZATION_TYPE 'none')` — anonymous IRC | ✅ `iceberg_scan('…/metadata.json')` | The reference open client. Consumes our static catalog with zero credentials. Also consumed Snowflake Horizon (live IRC) with a JWT. |
+| **DuckDB 1.5.6** (verified 2026-10-09) | ✅ `ATTACH … (TYPE iceberg, AUTHORIZATION_TYPE 'none')` — anonymous IRC; `SHOW ALL TABLES` lists the five catalog tables, `COUNT(*)` = 10000 | ✅ `iceberg_scan('…/metadata.json')` | The reference open client. Consumes our static catalog with zero credentials. Also consumed Snowflake Horizon (live IRC) with a JWT (on 1.5.3). The GCS, S3, CloudFront and Worker fronts all answered `/v1/config` with `200` on 2026-10-09. |
 | **Trino / Spark / PyIceberg** | ✅ (by spec — unauthenticated or token IRC) | ✅ | PyIceberg verified against Google BigLake's public catalog (token + header). Standards-conformant IRC clients. |
 | **Snowflake (GA May 2026)** | ❌ **direct** — `ICEBERG_REST` mandates `REST_AUTHENTICATION`; dummy token rejected by the object store. ✅ **via a permissive CDN/edge front** (CloudFront or a Cloudflare Worker that drops `Authorization`) + an external volume. Verified end-to-end (`COUNT=10000`, bbox `=196`). | ✅ managed write path; ❌ unmanaged external read | The one warehouse we got reading a (CDN-fronted) static Portolan catalog end-to-end. |
 | **Oracle ADB 26ai** | ❌ — `MOUNT_ICEBERG` requires a real `oauth2`/`gcp_oauth2`/`aws_role_arn`/`secret_id` credential (no static bearer) + a partner catalog type. Even via a Worker that serves a fake token endpoint, `MOUNT` only stores config — it defers/never connects (confirmed: zero requests reached the Worker). | ❌ — `ORA-20000: Failed to generate column list` (the reader bug, storage-independent) | Doubly blocked: catalog auth (needs token handshake) *and* the reader bug. |

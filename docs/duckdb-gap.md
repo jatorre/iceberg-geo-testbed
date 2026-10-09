@@ -1,5 +1,17 @@
 # DuckDB 1.5.3 — geometry bound deserialization gap
 
+> **Resolved in the stock DuckDB release (verified on 1.5.6).** [duckdb-iceberg#1030](https://github.com/duckdb/duckdb-iceberg/pull/1030)
+> (merged 2026-06-10) added the `GEOMETRY` branch: the `packed_xy_le`
+> bounds are decoded into a `GeometryStats` extent and files are pruned via
+> `GeometryStats::CheckZonemap`. Verified 2026-10-09 on the stock 1.5.6
+> release (iceberg extension `890b78a9c`): `ST_Intersects_Extent(geom, env)` / `geom && env` read 1/10 files
+> on `v3_geometry`; plain `ST_Intersects` is correct but still full-scans
+> because duckdb-spatial derives no bbox pre-filter from it. Issue
+> [#1002](https://github.com/duckdb/duckdb-iceberg/issues/1002) was closed
+> upstream on 2026-09-01. The text below is kept as the historical record of
+> the 1.5.3 behavior.
+
+
 DuckDB 1.5.3 (released 2026-05-20) ships initial `GEOMETRY` support for
 Iceberg tables. Schema parsing works — pointing `iceberg_scan(...)` at a
 metadata.json that declares a column as `geometry(OGC:CRS84)` correctly

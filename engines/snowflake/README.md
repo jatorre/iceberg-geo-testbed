@@ -89,8 +89,8 @@ non-spec-compliant V3**, not a Snowflake capability gap.
 
 Our V3 metadata.json claims `format-version: 3` and uses the V3
 `geometry(OGC:CRS84)` column type. But the **manifest avro** is V2
-format — pyiceberg 0.11.1 hardcodes `format_version=2` in
-`write_manifest()`. This mismatch (V3-claiming metadata.json pointed at
+format — pyiceberg (0.11.1, still true in 0.12.0) rejects
+`format_version=3` in `write_manifest()`. This mismatch (V3-claiming metadata.json pointed at
 V2 manifest avro) is what Snowflake flags as "incomplete state".
 
 Other tools we tested (Polaris, Iceberg-Spark, DuckDB) are *more
